@@ -21,22 +21,6 @@ const STATUS = {
   speaking: { label: 'Speaking…', hint: 'Tap the mic or speak to interrupt', dot: 'bg-brand-500' },
 };
 
-function StatusPill({ status }) {
-  const s = STATUS[status];
-  const animate = status !== 'idle';
-  return (
-    <div className="flex items-center gap-2 rounded-full bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 ring-1 ring-inset ring-slate-200">
-      <span className="relative flex h-2 w-2">
-        {animate && (
-          <span className={`absolute inline-flex h-full w-full animate-ping rounded-full ${s.dot} opacity-60`} />
-        )}
-        <span className={`relative inline-flex h-2 w-2 rounded-full ${s.dot}`} />
-      </span>
-      {s.label}
-    </div>
-  );
-}
-
 function Bubble({ msg }) {
   const isUser = msg.role === 'user';
   return (
@@ -51,7 +35,7 @@ function Bubble({ msg }) {
       <div
         className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
           isUser
-            ? 'rounded-tr-sm bg-brand-600 text-white'
+            ? 'rounded-tr-sm bg-slate-800 text-white'
             : 'rounded-tl-sm bg-white text-slate-700 ring-1 ring-inset ring-slate-200'
         }`}
       >
@@ -230,8 +214,8 @@ export default function Copilot() {
   const s = STATUS[status];
 
   return (
-    <div className="flex h-screen flex-col">
-      {/* Header */}
+    <div className="flex h-screen flex-col bg-gradient-to-b from-white to-slate-50">
+      {/* Slim header */}
       <div className="flex items-center justify-between border-b border-slate-200 bg-white/80 px-8 py-4 backdrop-blur">
         <div className="flex items-center gap-3">
           <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-brand-600 text-white shadow-sm shadow-brand-600/30">
@@ -242,114 +226,86 @@ export default function Copilot() {
             <p className="text-xs text-slate-500">Your AI strategic account copilot</p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <StatusPill status={status} />
-          <button
-            onClick={() => {
-              if (!muted) cutSpeech();
-              setMuted((m) => !m);
-            }}
-            title={muted ? 'Unmute voice' : 'Mute voice'}
-            className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
-          >
-            {muted ? <VolumeX size={18} /> : <Volume2 size={18} />}
-          </button>
-        </div>
+        <button
+          onClick={() => {
+            if (!muted) cutSpeech();
+            setMuted((m) => !m);
+          }}
+          title={muted ? 'Unmute voice' : 'Mute voice'}
+          className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+        >
+          {muted ? <VolumeX size={18} /> : <Volume2 size={18} />}
+        </button>
       </div>
 
-      {/* Orb hero */}
-      <div className="flex shrink-0 flex-col items-center gap-3 border-b border-slate-100 bg-gradient-to-b from-white to-slate-50/60 py-6">
-        <AnimatedOrb status={status} getLevel={() => levelRef.current} />
-        <div className="text-center">
-          <div className="text-sm font-semibold text-slate-800">{s.label}</div>
-          <div className="mt-0.5 text-xs text-slate-400">
-            {status === 'listening' && liveTranscript ? liveTranscript : s.hint}
+      {/* Centerpiece: orb + status, with suggestions or transcript below */}
+      <div className="flex flex-1 flex-col items-center overflow-hidden px-6 py-6">
+        <div className={`flex shrink-0 flex-col items-center gap-4 ${empty ? 'my-auto' : 'pt-4'}`}>
+          <AnimatedOrb status={status} getLevel={() => levelRef.current} />
+          <div className="text-center">
+            <div className="text-base font-semibold text-slate-800">{s.label}</div>
+            <div className="mt-1 min-h-[18px] max-w-sm text-sm text-slate-400">
+              {status === 'listening' && liveTranscript ? liveTranscript : s.hint}
+            </div>
           </div>
-        </div>
-        {sessionActive ? (
-          <Button variant="secondary" onClick={endConversation} className="border-rose-200 text-rose-600 hover:bg-rose-50">
-            <PhoneOff size={15} /> End Conversation
-          </Button>
-        ) : (
-          <Button onClick={startConversation}>
-            <Mic size={15} /> Start Conversation
-          </Button>
-        )}
-      </div>
 
-      {/* Conversation */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-8 py-6">
-        <div className="mx-auto max-w-3xl">
-          {empty ? (
-            <div className="flex flex-col items-center pt-2 text-center">
-              <p className="max-w-md text-sm text-slate-500">
-                Tap <span className="font-semibold text-slate-700">Start Conversation</span> for a
-                hands-free voice session, or ask a question below.
-              </p>
-              <div className="mt-6 grid w-full max-w-xl gap-2 sm:grid-cols-2">
-                {SUGGESTIONS.map((q) => (
-                  <button
-                    key={q}
-                    onClick={() => ask(q)}
-                    className="group rounded-xl border border-slate-200 bg-white px-4 py-3 text-left text-sm text-slate-700 transition-all hover:-translate-y-0.5 hover:border-brand-300 hover:shadow-cardhover"
-                  >
-                    <span className="font-medium group-hover:text-brand-700">{q}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          ) : (
-            <div className="space-y-5">
-              {messages.map((m, i) => (
-                <Bubble key={i} msg={m} />
-              ))}
-              {status === 'thinking' && (
-                <div className="flex gap-3 animate-fade-in">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand-600 text-white">
-                    <Sparkles size={16} />
-                  </div>
-                  <div className="flex items-center gap-1 rounded-2xl rounded-tl-sm bg-white px-4 py-3 ring-1 ring-inset ring-slate-200">
-                    {[0, 150, 300].map((d) => (
-                      <span
-                        key={d}
-                        className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-400"
-                        style={{ animationDelay: `${d}ms` }}
-                      />
-                    ))}
-                  </div>
-                </div>
-              )}
-              {/* Live transcript while listening */}
-              {status === 'listening' && liveTranscript && (
-                <div className="flex justify-end animate-fade-in">
-                  <div className="flex items-center gap-2 rounded-2xl rounded-tr-sm bg-brand-600/10 px-4 py-2.5 text-sm text-brand-800 ring-1 ring-inset ring-brand-200">
-                    <Mic size={14} className="text-emerald-500" />
-                    {liveTranscript}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Composer */}
-      <div className="border-t border-slate-200 bg-white px-8 py-4">
-        <div className="mx-auto max-w-3xl">
-          {!empty && (
-            <div className="mb-3 flex flex-wrap gap-2">
-              {SUGGESTIONS.slice(0, 4).map((q) => (
+          {/* Suggested prompts — initial load only */}
+          {empty && (
+            <div className="mt-2 grid w-full max-w-xl grid-cols-1 gap-2 sm:grid-cols-2">
+              {SUGGESTIONS.map((q) => (
                 <button
                   key={q}
                   onClick={() => ask(q)}
-                  disabled={thinkingRef.current}
-                  className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-medium text-slate-600 transition-colors hover:border-brand-300 hover:text-brand-700 disabled:opacity-50"
+                  className="group rounded-xl border border-slate-200 bg-white px-4 py-3 text-left text-sm text-slate-700 transition-all hover:-translate-y-0.5 hover:border-brand-300 hover:shadow-cardhover"
                 >
-                  {q}
+                  <span className="font-medium group-hover:text-brand-700">{q}</span>
                 </button>
               ))}
             </div>
           )}
+        </div>
+
+        {/* Transcript — replaces suggestions once a conversation starts */}
+        {!empty && (
+          <div
+            ref={scrollRef}
+            className="mt-6 w-full max-w-2xl space-y-4 overflow-y-auto px-1"
+            style={{ maxHeight: 300 }}
+          >
+            {messages.map((m, i) => (
+              <Bubble key={i} msg={m} />
+            ))}
+            {status === 'thinking' && (
+              <div className="flex gap-3 animate-fade-in">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand-600 text-white">
+                  <Sparkles size={16} />
+                </div>
+                <div className="flex items-center gap-1 rounded-2xl rounded-tl-sm bg-white px-4 py-3 ring-1 ring-inset ring-slate-200">
+                  {[0, 150, 300].map((d) => (
+                    <span
+                      key={d}
+                      className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-400"
+                      style={{ animationDelay: `${d}ms` }}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+            {status === 'listening' && liveTranscript && (
+              <div className="flex justify-end animate-fade-in">
+                <div className="flex items-center gap-2 rounded-2xl rounded-tr-sm bg-slate-800/90 px-4 py-2.5 text-sm text-white">
+                  <Mic size={14} className="text-emerald-400" />
+                  {liveTranscript}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Bottom bar: input · mic (continuous toggle) · send */}
+      <div className="border-t border-slate-200 bg-white px-8 py-4">
+        <div className="mx-auto max-w-2xl">
           <form
             onSubmit={(e) => {
               e.preventDefault();
@@ -365,31 +321,29 @@ export default function Copilot() {
                 className="flex-1 bg-transparent text-sm text-slate-800 outline-none placeholder:text-slate-400"
               />
             </div>
-            {sessionActive ? (
-              <button
-                type="button"
-                onClick={endConversation}
-                title="End conversation"
-                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-rose-500 text-white shadow-sm shadow-rose-500/40 transition-all hover:bg-rose-600"
-              >
-                <PhoneOff size={17} />
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={startConversation}
-                title="Start voice conversation"
-                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white text-slate-500 ring-1 ring-inset ring-slate-200 transition-all hover:text-brand-600 hover:ring-brand-300"
-              >
-                <Mic size={18} />
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={sessionActive ? endConversation : startConversation}
+              title={sessionActive ? 'End conversation' : 'Start voice conversation'}
+              className={`relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-all ${
+                sessionActive
+                  ? 'bg-rose-500 text-white shadow-sm shadow-rose-500/40 hover:bg-rose-600'
+                  : 'bg-white text-slate-500 ring-1 ring-inset ring-slate-200 hover:text-brand-600 hover:ring-brand-300'
+              }`}
+            >
+              {sessionActive && (
+                <span className="absolute inset-0 animate-pulse-ring rounded-xl bg-rose-500/40" />
+              )}
+              {sessionActive ? <PhoneOff size={17} /> : <Mic size={18} />}
+            </button>
             <Button type="submit" size="lg" disabled={!input.trim()} className="h-10">
               <Send size={16} />
             </Button>
           </form>
           <p className="mt-2 text-center text-[11px] text-slate-400">
-            AccountOS Copilot · Claude Sonnet 4.6 · Deepgram Flux STT + Flux TTS voice
+            {sessionActive
+              ? 'Continuous conversation active — tap the red button to end'
+              : 'AccountOS Copilot · Claude Sonnet 4.6 · Deepgram Flux STT + Flux TTS voice'}
           </p>
         </div>
       </div>

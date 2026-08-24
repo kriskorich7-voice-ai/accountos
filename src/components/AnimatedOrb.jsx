@@ -1,25 +1,31 @@
 import { useEffect, useRef, useState } from 'react';
 import { Sparkles, Mic } from 'lucide-react';
 
-// Radial gradients + glow per state. Indigo/violet base; amber for thinking.
+// Radial gradients + glow per state. Indigo/violet base (center → outer → edge);
+// amber for thinking.
+const BASE_GRADIENT =
+  'radial-gradient(circle at 35% 30%, #818cf8, #4f46e5 55%, #3730a3 100%)';
 const GRADIENTS = {
-  idle: 'radial-gradient(circle at 35% 30%, #818cf8, #6366f1 45%, #4f46e5 100%)',
-  listening: 'radial-gradient(circle at 35% 30%, #93c5fd, #6366f1 50%, #4f46e5 100%)',
-  thinking: 'radial-gradient(circle at 35% 30%, #fcd34d, #f59e0b 50%, #d97706 100%)',
-  speaking: 'radial-gradient(circle at 35% 30%, #a5b4fc, #6366f1 45%, #4338ca 100%)',
+  idle: BASE_GRADIENT,
+  listening: BASE_GRADIENT,
+  speaking: BASE_GRADIENT,
+  thinking: 'radial-gradient(circle at 35% 30%, #fcd34d, #f59e0b 55%, #b45309 100%)',
 };
 
 const STATIC_GLOW = {
   idle: '0 0 42px 2px rgba(99,102,241,0.35)',
-  listening: '0 0 56px 8px rgba(59,130,246,0.5)',
+  listening: '0 0 40px 8px rgba(96,165,250,0.65)',
   thinking: '0 0 52px 6px rgba(245,158,11,0.5)',
-  speaking: '0 0 42px 2px rgba(99,102,241,0.45)',
+  speaking: '0 0 44px 2px rgba(99,102,241,0.5)',
 };
 
 const RIPPLE_COLOR = {
-  listening: 'rgba(59,130,246,0.55)',
-  speaking: 'rgba(99,102,241,0.55)',
+  listening: 'rgba(96,165,250,0.6)',
+  speaking: 'rgba(129,140,248,0.6)',
 };
+
+const ORB_SIZE = 220;
+const CORE_SIZE = 188;
 
 // status: 'idle' | 'listening' | 'thinking' | 'speaking'
 // getLevel: () => number (0..1) — real-time TTS amplitude, read while speaking.
@@ -42,7 +48,7 @@ export default function AnimatedOrb({ status = 'idle', getLevel }) {
   }, [status, getLevel]);
 
   const speaking = status === 'speaking';
-  const scale = speaking ? 1 + Math.min(level, 1) * 0.3 : 1; // 1.0 → 1.3
+  const scale = speaking ? 1 + Math.min(level, 1) * 0.4 : 1; // 1.0 → 1.4
   const glow = speaking
     ? `0 0 ${44 + level * 90}px ${4 + level * 18}px rgba(99,102,241,${0.4 + level * 0.5})`
     : STATIC_GLOW[status];
@@ -58,16 +64,19 @@ export default function AnimatedOrb({ status = 'idle', getLevel }) {
   const rippleColor = RIPPLE_COLOR[status] || 'rgba(99,102,241,0.5)';
 
   return (
-    <div className="relative flex items-center justify-center" style={{ width: 200, height: 200 }}>
-      {/* Ripple rings emanating outward */}
+    <div
+      className="relative flex items-center justify-center"
+      style={{ width: ORB_SIZE, height: ORB_SIZE }}
+    >
+      {/* Ripple rings emanating outward (more rings while speaking) */}
       {showRipples &&
-        [0, 0.6, 1.2].map((delay) => (
+        (speaking ? [0, 0.45, 0.9, 1.35] : [0, 0.6, 1.2]).map((delay) => (
           <span
             key={delay}
             className="absolute rounded-full border-2 animate-orb-ripple"
             style={{
-              width: 184,
-              height: 184,
+              width: CORE_SIZE + 12,
+              height: CORE_SIZE + 12,
               borderColor: rippleColor,
               animationDelay: `${delay}s`,
             }}
@@ -79,8 +88,8 @@ export default function AnimatedOrb({ status = 'idle', getLevel }) {
         <span
           className="absolute rounded-full animate-orb-spin"
           style={{
-            width: 196,
-            height: 196,
+            width: ORB_SIZE - 6,
+            height: ORB_SIZE - 6,
             background:
               'conic-gradient(from 0deg, transparent 0deg, rgba(245,158,11,0.65) 90deg, transparent 200deg)',
           }}
@@ -91,14 +100,14 @@ export default function AnimatedOrb({ status = 'idle', getLevel }) {
       <div
         className={`relative rounded-full ${orbAnim}`}
         style={{
-          width: 176,
-          height: 176,
+          width: CORE_SIZE,
+          height: CORE_SIZE,
           background: GRADIENTS[status],
           boxShadow: glow,
           transform: speaking ? `scale(${scale})` : undefined,
           transition: speaking
             ? 'transform 70ms linear, box-shadow 70ms linear'
-            : 'box-shadow 300ms ease, background 300ms ease',
+            : 'all 0.3s ease',
         }}
       >
         {/* Specular highlight */}
@@ -111,7 +120,7 @@ export default function AnimatedOrb({ status = 'idle', getLevel }) {
         />
         {/* Center icon */}
         <div className="absolute inset-0 flex items-center justify-center text-white/90">
-          {status === 'listening' ? <Mic size={36} /> : <Sparkles size={36} />}
+          {status === 'listening' ? <Mic size={40} /> : <Sparkles size={40} />}
         </div>
       </div>
     </div>
