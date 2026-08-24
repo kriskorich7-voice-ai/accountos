@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { Sparkles, Send, Mic, Square, Volume2, VolumeX, User } from 'lucide-react';
 import { askClaude, localAnswer } from '../lib/copilot.js';
-import { startLiveTranscription, synthesizeSpeech } from '../lib/deepgram.js';
+import { startLiveTranscription, streamSpeech } from '../lib/deepgram.js';
 import { Button } from '../components/ui.jsx';
 
 const SUGGESTIONS = [
@@ -70,8 +70,9 @@ export default function Copilot() {
 
   const scrollRef = useRef(null);
   const liveRef = useRef(null); // active STT controller
-  const audioCtxRef = useRef(null); // Web Audio context for TTS playback
-  const sourceRef = useRef(null); // active TTS buffer source
+  const ttsRef = useRef(null); // active streaming-TTS controller
+  const voiceModeRef = useRef(false); // was the current turn started by voice?
+  const startListeningRef = useRef(null); // late-bound to avoid init-order cycle
   const mutedRef = useRef(muted);
   mutedRef.current = muted;
 
@@ -82,37 +83,41 @@ export default function Copilot() {
   useEffect(() => {
     return () => {
       liveRef.current?.stop();
-      sourceRef.current?.stop?.();
+      ttsRef.current?.stop();
     };
   }, []);
 
-  // Play Claude's reply through the Web Audio API using Flux TTS.
-  const speak = useCallback(async (text) => {
-    if (mutedRef.current) return;
-    try {
-      setStatus('speaking');
-      const audioData = await synthesizeSpeech(text);
-      const AudioCtx = window.AudioContext || window.webkitAudioContext;
-      if (!audioCtxRef.current) audioCtxRef.current = new AudioCtx();
-      const ctx = audioCtxRef.current;
-      if (ctx.state === 'suspended') await ctx.resume();
-      const buffer = await ctx.decodeAudioData(audioData.slice(0));
-      const src = ctx.createBufferSource();
-      src.buffer = buffer;
-      src.connect(ctx.destination);
-      sourceRef.current = src;
-      src.onended = () => setStatus('idle');
-      src.start();
-    } catch {
-      // Playback unavailable — silently return to idle.
-      setStatus('idle');
-    }
-  }, []);
+  // Speak Claude's reply via Flux TTS streaming WebSocket (Web Audio playback).
+  // Resolves once audio has finished (AudioDone) or immediately if muted.
+  const speak = useCallback((text) =>
+    new Promise((resolve) => {
+      if (mutedRef.current) {
+        resolve();
+        return;
+      }
+      try {
+        ttsRef.current = streamSpeech(text, {
+          onStart: () => setStatus('speaking'),
+          onEnd: () => {
+            ttsRef.current = null;
+            resolve();
+          },
+          onError: () => {
+            ttsRef.current = null;
+            resolve();
+          },
+        });
+      } catch {
+        resolve();
+      }
+    }),
+  []);
 
   const submit = useCallback(
-    async (text) => {
+    async (text, fromVoice = false) => {
       const trimmed = text.trim();
       if (!trimmed || busy) return;
+      voiceModeRef.current = fromVoice;
       setInput('');
       setLiveTranscript('');
       setBusy(true);
@@ -131,6 +136,9 @@ export default function Copilot() {
       setMessages((m) => [...m, { role: 'assistant', content: reply }]);
       setBusy(false);
       await speak(reply);
+      // After speaking, a voice turn returns to Listening for a hands-free loop.
+      if (voiceModeRef.current && !mutedRef.current) startListeningRef.current?.();
+      else setStatus('idle');
     },
     [messages, busy, speak],
   );
@@ -142,9 +150,9 @@ export default function Copilot() {
 
   const startListening = useCallback(async () => {
     // Stop any in-flight playback so the mic doesn't capture it.
-    try {
-      sourceRef.current?.stop();
-    } catch {}
+    ttsRef.current?.stop();
+    ttsRef.current = null;
+    voiceModeRef.current = true;
     setLiveTranscript('');
     try {
       liveRef.current = await startLiveTranscription({
@@ -152,7 +160,7 @@ export default function Copilot() {
         onPartial: (t) => setLiveTranscript(t),
         onFinal: (t) => {
           stopListening();
-          submit(t);
+          submit(t, true);
         },
         onError: () => {
           stopListening();
@@ -166,6 +174,8 @@ export default function Copilot() {
       setStatus('idle');
     }
   }, [submit, stopListening]);
+
+  startListeningRef.current = startListening;
 
   const toggleMic = () => (status === 'listening' ? stopListening() : startListening());
   const empty = messages.length === 0;

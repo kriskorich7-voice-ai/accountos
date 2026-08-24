@@ -1,29 +1,138 @@
 // Deepgram STT + TTS helpers. Uses VITE_DEEPGRAM_API_KEY.
-// TTS: Flux (flux-alexis-en) via the v2 speak endpoint.
+// TTS: Flux (flux-alexis-en) streamed over the v2 speak WebSocket.
 // STT: Flux streaming (flux-general-en) via the v2 listen WebSocket.
 
 const DG_KEY = import.meta.env.VITE_DEEPGRAM_API_KEY;
 
 export const hasDeepgram = Boolean(DG_KEY);
 
-// ---- Text-to-Speech: Flux -------------------------------------------------
+// ---- Text-to-Speech: Flux streaming ---------------------------------------
 
-// Synthesize speech with Deepgram Flux TTS and return the raw audio bytes.
-// Callers play this through the Web Audio API.
-export async function synthesizeSpeech(text) {
+const TTS_SAMPLE_RATE = 24000;
+
+// Stream speech from Deepgram Flux TTS over a WebSocket and play it gaplessly
+// through the Web Audio API as linear16 chunks arrive. Lower latency than the
+// REST endpoint since playback starts on the first chunk.
+//
+// callbacks: { onStart, onEnd, onError }
+// Returns a controller with stop().
+export function streamSpeech(text, { onStart, onEnd, onError } = {}) {
   if (!DG_KEY) throw new Error('Missing VITE_DEEPGRAM_API_KEY');
-  // Keep spoken responses concise for latency.
-  const clipped = text.length > 1800 ? text.slice(0, 1800) : text;
-  const res = await fetch('https://api.deepgram.com/v2/speak?model=flux-alexis-en', {
-    method: 'POST',
-    headers: {
-      Authorization: `Token ${DG_KEY}`,
-      'Content-Type': 'application/json',
+
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  const ctx = new AudioCtx({ sampleRate: TTS_SAMPLE_RATE });
+
+  const url = `wss://api.deepgram.com/v2/speak?model=flux-alexis-en&encoding=linear16&sample_rate=${TTS_SAMPLE_RATE}`;
+  // Browsers can't set headers on a WebSocket; Deepgram reads the token from the
+  // Sec-WebSocket-Protocol handshake, expressed here as the sub-protocol array.
+  const ws = new WebSocket(url, ['token', DG_KEY]);
+  ws.binaryType = 'arraybuffer';
+
+  const sources = [];
+  let nextStartTime = 0; // AudioContext time cursor for gapless scheduling
+  let carry = null; // leftover odd byte spanning two binary frames
+  let started = false;
+  let finished = false;
+
+  const teardown = () => {
+    try {
+      ws.close();
+    } catch {}
+    ctx.close().catch(() => {});
+  };
+
+  // Called when the server signals AudioDone (or the socket closes). Waits for
+  // any already-scheduled audio to finish, then reports completion.
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    try {
+      ws.close();
+    } catch {}
+    const remainingMs = Math.max(0, (nextStartTime - ctx.currentTime) * 1000);
+    setTimeout(() => {
+      ctx.close().catch(() => {});
+      onEnd?.();
+    }, remainingMs + 120);
+  };
+
+  const playChunk = (arrayBuffer) => {
+    let bytes = new Uint8Array(arrayBuffer);
+    if (carry) {
+      const merged = new Uint8Array(carry.length + bytes.length);
+      merged.set(carry);
+      merged.set(bytes, carry.length);
+      bytes = merged;
+      carry = null;
+    }
+    // linear16 is 2 bytes/sample — hold back a trailing odd byte for next frame.
+    if (bytes.length % 2 !== 0) {
+      carry = bytes.slice(bytes.length - 1);
+      bytes = bytes.slice(0, bytes.length - 1);
+    }
+    if (bytes.length === 0) return;
+
+    const int16 = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.length / 2);
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
+
+    const buffer = ctx.createBuffer(1, float32.length, TTS_SAMPLE_RATE);
+    buffer.getChannelData(0).set(float32);
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(ctx.destination);
+    const startAt = Math.max(ctx.currentTime, nextStartTime);
+    src.start(startAt);
+    nextStartTime = startAt + buffer.duration;
+    sources.push(src);
+
+    if (!started) {
+      started = true;
+      onStart?.();
+    }
+  };
+
+  ws.onopen = async () => {
+    try {
+      if (ctx.state === 'suspended') await ctx.resume();
+    } catch {}
+    ws.send(JSON.stringify({ type: 'Speak', text }));
+    ws.send(JSON.stringify({ type: 'Flush' }));
+  };
+
+  ws.onmessage = (evt) => {
+    if (typeof evt.data === 'string') {
+      let msg;
+      try {
+        msg = JSON.parse(evt.data);
+      } catch {
+        return;
+      }
+      // AudioDone marks the end of synthesized audio for the flushed text.
+      if (msg.type === 'AudioDone' || msg.type === 'Done' || msg.type === 'Close') {
+        finish();
+      }
+      return;
+    }
+    playChunk(evt.data);
+  };
+
+  ws.onerror = (e) => onError?.(e);
+  ws.onclose = () => {
+    if (!finished) finish();
+  };
+
+  return {
+    stop() {
+      finished = true;
+      sources.forEach((s) => {
+        try {
+          s.stop();
+        } catch {}
+      });
+      teardown();
     },
-    body: JSON.stringify({ text: clipped }),
-  });
-  if (!res.ok) throw new Error(`Deepgram TTS ${res.status}`);
-  return await res.arrayBuffer();
+  };
 }
 
 // ---- Speech-to-Text: Flux streaming ---------------------------------------
