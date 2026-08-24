@@ -1,9 +1,15 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Sparkles, Send, Mic, MicOff, Volume2, VolumeX, User } from 'lucide-react';
-import { askClaude, localAnswer } from '../lib/copilot.js';
-import { startLiveTranscription, createSpeechSession } from '../lib/deepgram.js';
-import { Button } from '../components/ui.jsx';
+import { Sparkles, Volume2, VolumeX, User, Mic } from 'lucide-react';
+import { createVoiceAgent, hasDeepgram } from '../lib/deepgram.js';
 import AnimatedOrb from '../components/AnimatedOrb.jsx';
+
+// System prompt + opening line for the Voice Agent (Claude Sonnet 4.6). Numbers
+// are spelled out so Flux TTS reads them naturally.
+const AGENT_PROMPT =
+  'You are AccountOS, an AI strategic account intelligence copilot for Kris Korich, a Strategic Account Manager at Deepgram. You have deep knowledge of the Acme Corporation account. Key facts: $2.4M ARR, 87 health score out of 100, 18 percent usage growth year over year, projected capacity exhaustion in 47 days, 3 expansion opportunities: Conversational AI worth 780 thousand to 1.2 million dollars, Sales Voice worth 250 to 400 thousand dollars, Marketing worth 180 to 300 thousand dollars. Business unit adoption: Customer Service 92 percent, Training 76 percent, Sales 34 percent, Operations 18 percent, Marketing 4 percent, Digital Experience 0 percent. Key contacts: Sarah Mitchell VP of Customer Experience, Daniel Rodriguez Director of AI Platforms. Answer questions about the account strategically and concisely. Be direct and actionable. Never use markdown formatting, asterisks, or bullet points in your responses — speak in natural sentences only. When mentioning numbers, say them as words: say eighty-seven not 87, say eighteen percent not 18%, say 2.4 million not $2.4M.';
+
+const GREETING =
+  "Hello Kris, I'm AccountOS, your AI account copilot for Acme Corporation. What would you like to know?";
 
 const SUGGESTIONS = [
   'Why is this account healthy?',
@@ -15,10 +21,11 @@ const SUGGESTIONS = [
 ];
 
 const STATUS = {
-  idle: { label: 'Ready', hint: 'Start a conversation or type below', dot: 'bg-slate-300' },
-  listening: { label: 'Listening…', hint: 'Speak now — I’m listening', dot: 'bg-emerald-500' },
-  thinking: { label: 'Thinking…', hint: 'Analyzing the Acme account', dot: 'bg-amber-500' },
-  speaking: { label: 'Speaking…', hint: 'Tap the mic or speak to interrupt', dot: 'bg-brand-500' },
+  idle: { label: 'Ready' },
+  connecting: { label: 'Connecting…' },
+  listening: { label: 'Listening…' },
+  thinking: { label: 'Thinking…' },
+  speaking: { label: 'Speaking…' },
 };
 
 function Bubble({ msg }) {
@@ -47,258 +54,85 @@ function Bubble({ msg }) {
 
 export default function Copilot() {
   const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState('');
-  const [status, setStatus] = useState('idle');
-  const [muted, setMuted] = useState(false);
+  const [status, setStatus] = useState('idle'); // idle when no session
   const [sessionActive, setSessionActive] = useState(false);
-  const [liveTranscript, setLiveTranscript] = useState('');
-
-  const [dictating, setDictating] = useState(false);
+  const [muted, setMuted] = useState(false);
+  const [error, setError] = useState('');
 
   const scrollRef = useRef(null);
-  const liveRef = useRef(null); // continuous session STT controller
-  const dictRef = useRef(null); // separate dictation STT controller
-  const dictBaseRef = useRef(''); // input text captured before dictation began
-  const ttsRef = useRef(null); // persistent Flux TTS session (one WS per convo)
-  const levelRef = useRef(0); // latest TTS amplitude (0..1) for the orb
-  const respondRef = useRef(null); // late-bound to break the init-order cycle
-  const pendingInputRef = useRef(null); // new user input captured during a barge-in
-
-  // Live flags read inside async callbacks (avoid stale closures).
-  const sessionRef = useRef(false);
-  const thinkingRef = useRef(false); // awaiting Claude — ignore incoming finals
-  const speakingRef = useRef(false); // TTS audio playing — a signal means barge-in
-  const messagesRef = useRef(messages);
-  const mutedRef = useRef(muted);
-  messagesRef.current = messages;
-  mutedRef.current = muted;
+  const agentRef = useRef(null);
+  const levelRef = useRef(0); // output amplitude for the orb
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
-  }, [messages, status, liveTranscript]);
+  }, [messages, status]);
 
   useEffect(() => {
-    return () => {
-      liveRef.current?.stop();
-      dictRef.current?.stop();
-      ttsRef.current?.close();
-    };
+    return () => agentRef.current?.stop();
   }, []);
 
-  // Lazily create the persistent TTS session (a single WebSocket kept open for
-  // voice consistency). Reused across turns; only closed when the convo ends.
-  const ensureTts = useCallback(() => {
-    if (ttsRef.current) return ttsRef.current;
-    ttsRef.current = createSpeechSession({
-      onStart: () => setStatus('speaking'),
-      onLevel: (v) => {
-        levelRef.current = v;
-      },
-      onError: () => {},
+  // Append a transcript line, de-duping an identical consecutive entry.
+  const addTranscript = useCallback((role, content) => {
+    setMessages((m) => {
+      const last = m[m.length - 1];
+      if (last && last.role === role && last.content === content) return m;
+      return [...m, { role, content }];
     });
-    return ttsRef.current;
   }, []);
 
-  // Speak text on the SAME TTS socket. Resolves with the protocol result:
-  // { interrupted, textSpoken, noAudio }. Outside a session it's a one-shot
-  // connection closed on completion.
-  const speak = useCallback(
-    async (text) => {
-      if (mutedRef.current) return { interrupted: false, textSpoken: text };
-      const tts = ensureTts();
-      speakingRef.current = true;
-      let result;
-      try {
-        result = await tts.speak(text);
-      } catch {
-        result = { interrupted: false, textSpoken: null };
-      }
-      speakingRef.current = false;
-      levelRef.current = 0;
-      // No active session → this was a transient connection; close it.
-      if (!sessionRef.current && ttsRef.current) {
-        ttsRef.current.close();
-        ttsRef.current = null;
-      }
-      return result;
-    },
-    [ensureTts],
-  );
-
-  // Immediate barge-in: stop audio and send Interrupt on the SAME socket. The
-  // awaiting speak() resolves via SpeechInterrupted.
-  const interruptSpeech = useCallback(() => {
-    speakingRef.current = false; // block repeat triggers from further partials
-    ttsRef.current?.interrupt();
-  }, []);
-
-  // Core turn: user utterance → Claude → spoken reply. History only ever records
-  // COMPLETE replies (natural finish) or the actual text_spoken on interruption.
-  const respond = useCallback(
-    async (text) => {
-      const trimmed = text.trim();
-      if (!trimmed || thinkingRef.current) return;
-      thinkingRef.current = true;
-      setInput('');
-      setLiveTranscript('');
-      const history = messagesRef.current;
-      setMessages((m) => [...m, { role: 'user', content: trimmed }]);
-      setStatus('thinking');
-
-      let reply;
-      try {
-        reply = await askClaude(history, trimmed); // full response, not streamed
-      } catch {
-        reply = localAnswer(trimmed);
-      }
-      thinkingRef.current = false;
-
-      const result = await speak(reply);
-
-      if (result.interrupted) {
-        // Record only what was actually spoken as a partial assistant turn.
-        // NO_AUDIO_GENERATED → nothing was said, so add no assistant turn.
-        if (!result.noAudio) {
-          const partial =
-            result.textSpoken && result.textSpoken.trim() ? result.textSpoken.trim() : '[interrupted]';
-          setMessages((m) => [...m, { role: 'assistant', content: partial }]);
-        }
-      } else {
-        setMessages((m) => [...m, { role: 'assistant', content: reply }]);
-      }
-
-      // A barge-in captured new user input — process it next (keeps ordering:
-      // partial assistant turn is already recorded above).
-      const next = pendingInputRef.current;
-      if (next) {
-        pendingInputRef.current = null;
-        respondRef.current?.(next);
-        return;
-      }
-      // Don't stomp a turn that has already started thinking.
-      if (!thinkingRef.current) setStatus(sessionRef.current ? 'listening' : 'idle');
-    },
-    [speak],
-  );
-  respondRef.current = respond;
-
-  // --- Session control (owned by the orb) ---------------------------------
-
-  const startConversation = useCallback(async () => {
-    sessionRef.current = true;
+  const startSession = useCallback(async () => {
+    if (!hasDeepgram) {
+      setError('Set VITE_DEEPGRAM_API_KEY to enable the voice agent.');
+      return;
+    }
+    setError('');
     setSessionActive(true);
-    setLiveTranscript('');
-    ensureTts(); // open the persistent TTS socket up front
+    setStatus('connecting');
     try {
-      liveRef.current = await startLiveTranscription({
-        onOpen: () => {
-          if (!speakingRef.current && !thinkingRef.current) setStatus('listening');
+      const agent = createVoiceAgent({
+        prompt: AGENT_PROMPT,
+        greeting: GREETING,
+        onState: (st) => setStatus(st),
+        onTranscript: (role, content) => addTranscript(role, content),
+        onLevel: (v) => {
+          levelRef.current = v;
         },
-        onPartial: (t) => {
-          const text = t.trim();
-          if (speakingRef.current) {
-            // Speech detected while TTS plays → barge-in as soon as it's real
-            // (ignore tiny blips that are likely residual echo).
-            if (text.replace(/[^a-z0-9]/gi, '').length >= 3) interruptSpeech();
-          } else if (!thinkingRef.current) {
-            setLiveTranscript(text);
-          }
-        },
-        onFinal: (t) => {
-          const text = t.trim();
-          if (!sessionRef.current || !text) return;
-          if (thinkingRef.current) return; // waiting on Claude — never interrupt that
-          if (speakingRef.current) {
-            // Final beat the partial trigger — stash input, interrupt, and let
-            // the interrupted turn hand off to it (preserves message order).
-            pendingInputRef.current = text;
-            interruptSpeech();
-            return;
-          }
-          respondRef.current?.(text);
-        },
-        onError: () => {},
-        onClose: () => {
-          if (sessionRef.current) setStatus((st) => (st === 'listening' ? 'idle' : st));
-        },
+        onError: () => setError('Voice agent connection error. Please try again.'),
+        onClose: () => {},
       });
+      agent.setMuted(muted);
+      await agent.start();
+      agentRef.current = agent;
     } catch {
-      sessionRef.current = false;
       setSessionActive(false);
       setStatus('idle');
+      setError('Could not start the voice agent. Check your microphone permission.');
     }
-  }, [ensureTts, interruptSpeech]);
+  }, [addTranscript, muted]);
 
-  const endConversation = useCallback(() => {
-    sessionRef.current = false;
-    setSessionActive(false);
-    liveRef.current?.stop();
-    liveRef.current = null;
-    ttsRef.current?.close(); // close the TTS socket only now
-    ttsRef.current = null;
-    speakingRef.current = false;
-    thinkingRef.current = false;
-    pendingInputRef.current = null;
+  const endSession = useCallback(() => {
+    agentRef.current?.stop();
+    agentRef.current = null;
     levelRef.current = 0;
-    setLiveTranscript('');
+    setSessionActive(false);
     setStatus('idle');
   }, []);
 
   const toggleSession = useCallback(() => {
-    if (sessionRef.current) endConversation();
-    else startConversation();
-  }, [startConversation, endConversation]);
+    if (sessionActive) endSession();
+    else startSession();
+  }, [sessionActive, startSession, endSession]);
 
-  // --- Dictation (owned by the mic button, independent of the session) -----
-
-  const stopDictation = useCallback(() => {
-    dictRef.current?.stop();
-    dictRef.current = null;
-    setDictating(false);
-  }, []);
-
-  const toggleDictation = useCallback(async () => {
-    if (dictRef.current) {
-      stopDictation();
-      return;
-    }
-    dictBaseRef.current = input ? input.trim() + ' ' : '';
-    setDictating(true);
-    try {
-      dictRef.current = await startLiveTranscription({
-        onOpen: () => {},
-        onPartial: (t) => setInput(dictBaseRef.current + t),
-        onFinal: (t) => {
-          dictBaseRef.current = (dictBaseRef.current + t).trim() + ' ';
-          setInput(dictBaseRef.current);
-        },
-        onError: () => stopDictation(),
-        onClose: () => setDictating(false),
-      });
-    } catch {
-      setDictating(false);
-      dictRef.current = null;
-    }
-  }, [input, stopDictation]);
-
-  // Text / suggestion entry (works with or without an active voice session).
-  const ask = useCallback(
-    (text) => {
-      if (thinkingRef.current) return;
-      if (speakingRef.current) {
-        // Typing interrupts the current reply too — stash and hand off so the
-        // interrupted turn records its partial before the new turn runs.
-        pendingInputRef.current = text;
-        interruptSpeech();
-        return;
-      }
-      respond(text);
-    },
-    [interruptSpeech, respond],
-  );
+  const toggleMute = () => {
+    setMuted((m) => {
+      const next = !m;
+      agentRef.current?.setMuted(next);
+      return next;
+    });
+  };
 
   const empty = messages.length === 0;
-  const s = STATUS[status];
+  const s = STATUS[status] || STATUS.idle;
 
   return (
     <div className="flex h-screen flex-col bg-gradient-to-b from-white to-slate-50">
@@ -310,15 +144,12 @@ export default function Copilot() {
           </div>
           <div>
             <h1 className="text-lg font-bold tracking-tight text-slate-900">Ask AccountOS</h1>
-            <p className="text-xs text-slate-500">Your AI strategic account copilot</p>
+            <p className="text-xs text-slate-500">Your AI strategic account copilot · Deepgram Voice Agent</p>
           </div>
         </div>
         <button
-          onClick={() => {
-            if (!muted) interruptSpeech();
-            setMuted((m) => !m);
-          }}
-          title={muted ? 'Unmute voice' : 'Mute voice'}
+          onClick={toggleMute}
+          title={muted ? 'Unmute agent' : 'Mute agent'}
           className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
         >
           {muted ? <VolumeX size={18} /> : <Volume2 size={18} />}
@@ -328,128 +159,71 @@ export default function Copilot() {
       {/* Centerpiece: orb + status, with suggestions or transcript below */}
       <div className="flex flex-1 flex-col items-center overflow-hidden px-6 py-6">
         <div className={`flex shrink-0 flex-col items-center gap-4 ${empty ? 'my-auto' : 'pt-4'}`}>
-          {/* Orb is the primary conversation control — click to start/stop */}
+          {/* Orb is the sole session control */}
           <button
             type="button"
             onClick={toggleSession}
             aria-label={sessionActive ? 'Stop conversation' : 'Start conversation'}
             className="group rounded-full outline-none transition-transform focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:ring-offset-2 active:scale-95"
           >
-            <AnimatedOrb status={status} getLevel={() => levelRef.current} />
+            <AnimatedOrb
+              status={status === 'connecting' ? 'thinking' : status}
+              getLevel={() => levelRef.current}
+            />
           </button>
           <div className="text-center">
             <div className="text-base font-semibold text-slate-800">{s.label}</div>
-            <div className="mt-1 min-h-[18px] max-w-sm text-sm text-slate-400">
-              {status === 'listening' && liveTranscript
-                ? liveTranscript
-                : sessionActive
-                  ? 'Click orb to stop'
-                  : 'Click orb to start'}
+            <div className="mt-1 min-h-[18px] text-sm text-slate-400">
+              {sessionActive ? 'Click orb to stop' : 'Click orb to start'}
             </div>
+            {error && <div className="mt-1 text-xs font-medium text-rose-500">{error}</div>}
           </div>
 
-          {/* Suggested prompts — initial load only */}
+          {/* Suggested prompts — shown before a conversation begins */}
           {empty && (
-            <div className="mt-2 grid w-full max-w-xl grid-cols-1 gap-2 sm:grid-cols-2">
-              {SUGGESTIONS.map((q) => (
-                <button
-                  key={q}
-                  onClick={() => ask(q)}
-                  className="group rounded-xl border border-slate-200 bg-white px-4 py-3 text-left text-sm text-slate-700 transition-all hover:-translate-y-0.5 hover:border-brand-300 hover:shadow-cardhover"
-                >
-                  <span className="font-medium group-hover:text-brand-700">{q}</span>
-                </button>
-              ))}
+            <div className="mt-2 w-full max-w-xl">
+              <div className="mb-2 text-center text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                Try asking out loud
+              </div>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                {SUGGESTIONS.map((q) => (
+                  <button
+                    key={q}
+                    onClick={toggleSession}
+                    className="group rounded-xl border border-slate-200 bg-white px-4 py-3 text-left text-sm text-slate-700 transition-all hover:-translate-y-0.5 hover:border-brand-300 hover:shadow-cardhover"
+                  >
+                    <span className="flex items-center gap-2 font-medium group-hover:text-brand-700">
+                      <Mic size={13} className="text-slate-300 group-hover:text-brand-400" />
+                      {q}
+                    </span>
+                  </button>
+                ))}
+              </div>
             </div>
           )}
         </div>
 
-        {/* Transcript — replaces suggestions once a conversation starts */}
+        {/* Transcript */}
         {!empty && (
           <div
             ref={scrollRef}
             className="mt-6 w-full max-w-2xl space-y-4 overflow-y-auto px-1"
-            style={{ maxHeight: 300 }}
+            style={{ maxHeight: 340 }}
           >
             {messages.map((m, i) => (
               <Bubble key={i} msg={m} />
             ))}
-            {status === 'thinking' && (
-              <div className="flex gap-3 animate-fade-in">
-                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand-600 text-white">
-                  <Sparkles size={16} />
-                </div>
-                <div className="flex items-center gap-1 rounded-2xl rounded-tl-sm bg-white px-4 py-3 ring-1 ring-inset ring-slate-200">
-                  {[0, 150, 300].map((d) => (
-                    <span
-                      key={d}
-                      className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-400"
-                      style={{ animationDelay: `${d}ms` }}
-                    />
-                  ))}
-                </div>
-              </div>
-            )}
-            {status === 'listening' && liveTranscript && (
-              <div className="flex justify-end animate-fade-in">
-                <div className="flex items-center gap-2 rounded-2xl rounded-tr-sm bg-slate-800/90 px-4 py-2.5 text-sm text-white">
-                  <Mic size={14} className="text-emerald-400" />
-                  {liveTranscript}
-                </div>
-              </div>
-            )}
           </div>
         )}
       </div>
 
-      {/* Bottom bar: input · mic (continuous toggle) · send */}
-      <div className="border-t border-slate-200 bg-white px-8 py-4">
-        <div className="mx-auto max-w-2xl">
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (input.trim()) ask(input);
-            }}
-            className="flex items-center gap-2"
-          >
-            <div className="flex flex-1 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 shadow-sm focus-within:border-brand-400 focus-within:ring-2 focus-within:ring-brand-100">
-              <input
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                placeholder="Ask about Acme Corporation…"
-                className="flex-1 bg-transparent text-sm text-slate-800 outline-none placeholder:text-slate-400"
-              />
-            </div>
-            <button
-              type="button"
-              onClick={toggleDictation}
-              title="Dictate"
-              className={`group relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-all ${
-                dictating
-                  ? 'bg-brand-600 text-white shadow-sm shadow-brand-600/40 hover:bg-brand-700'
-                  : 'bg-white text-slate-500 ring-1 ring-inset ring-slate-200 hover:text-brand-600 hover:ring-brand-300'
-              }`}
-            >
-              {dictating && (
-                <span className="absolute inset-0 animate-pulse-ring rounded-xl bg-brand-500/40" />
-              )}
-              {dictating ? <MicOff size={17} /> : <Mic size={18} />}
-              <span className="pointer-events-none absolute -top-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md bg-slate-900 px-2 py-1 text-[10px] font-medium text-white opacity-0 transition-opacity group-hover:opacity-100">
-                {dictating ? 'Stop dictation' : 'Dictate'}
-              </span>
-            </button>
-            <Button type="submit" size="lg" disabled={!input.trim()} className="h-10">
-              <Send size={16} />
-            </Button>
-          </form>
-          <p className="mt-2 text-center text-[11px] text-slate-400">
-            {sessionActive
-              ? 'Conversation active — click the orb to stop · mic dictates into the box'
-              : dictating
-                ? 'Dictating… speak, then click the mic to stop'
-                : 'Click the orb for hands-free voice · mic to dictate · or type'}
-          </p>
-        </div>
+      {/* Footer note */}
+      <div className="border-t border-slate-200 bg-white px-8 py-3">
+        <p className="text-center text-[11px] text-slate-400">
+          {sessionActive
+            ? 'Live voice session — speak naturally, the agent handles turns and interruptions'
+            : 'Deepgram Voice Agent · Flux STT + Claude Sonnet 4.6 + Flux TTS · one real-time connection'}
+        </p>
       </div>
     </div>
   );
