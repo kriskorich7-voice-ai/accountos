@@ -1,0 +1,42 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    @apply bg-gray-50 text-slate-800 font-sans;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #cbd5e1 transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 9999px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-xl border border-slate-200/80 bg-white shadow-card;
+  }
+  .metric-label {
+    @apply text-[11px] font-semibold uppercase tracking-wider text-slate-400;
+  }
+  .focus-ring {
+    @apply outline-none ring-offset-2 focus-visible:ring-2 focus-visible:ring-brand-500;
+  }
+}
