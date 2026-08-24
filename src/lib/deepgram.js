@@ -10,17 +10,51 @@ export const hasDeepgram = Boolean(DG_KEY);
 
 const TTS_SAMPLE_RATE = 24000;
 
+// Normalize text so Flux TTS reads numbers, currency, and acronyms naturally.
+// e.g. "87/100" → "87 out of 100", "$4.8M" → "4.8 million dollars".
+export function normalizeForTTS(text) {
+  return text
+    // Fix score formats like 87/100 → "87 out of 100"
+    .replace(/(\d+)\/(\d+)/g, '$1 out of $2')
+    // Fix percentage with + sign like +18% → "18 percent"
+    .replace(/\+(\d+)%/g, '$1 percent')
+    // Fix standalone percentages like 18% → "18 percent"
+    .replace(/(\d+)%/g, '$1 percent')
+    // Fix dollar amounts like $4.8M → "4.8 million dollars"
+    .replace(/\$(\d+\.?\d*)M/g, '$1 million dollars')
+    // Fix dollar amounts like $780K → "780 thousand dollars"
+    .replace(/\$(\d+\.?\d*)K/g, '$1 thousand dollars')
+    // Fix YoY → "year over year"
+    .replace(/YoY/g, 'year over year')
+    // Fix ARR → "annual recurring revenue"
+    .replace(/\bARR\b/g, 'annual recurring revenue')
+    // Fix remaining +number like +18 → "18"
+    .replace(/\+(\d+)/g, '$1')
+    .trim();
+}
+
 // Stream speech from Deepgram Flux TTS over a WebSocket and play it gaplessly
 // through the Web Audio API as linear16 chunks arrive. Lower latency than the
-// REST endpoint since playback starts on the first chunk.
+// REST endpoint since playback starts on the first chunk. An AnalyserNode is
+// tapped so callers can drive a visualizer from real-time amplitude.
 //
-// callbacks: { onStart, onEnd, onError }
+// callbacks: { onStart, onEnd, onError, onLevel(0..1) }
 // Returns a controller with stop().
-export function streamSpeech(text, { onStart, onEnd, onError } = {}) {
+export function streamSpeech(text, { onStart, onEnd, onError, onLevel } = {}) {
   if (!DG_KEY) throw new Error('Missing VITE_DEEPGRAM_API_KEY');
 
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
   const ctx = new AudioCtx({ sampleRate: TTS_SAMPLE_RATE });
+
+  // Analyser taps the graph: sources → analyser → destination.
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 256;
+  analyser.smoothingTimeConstant = 0.8;
+  analyser.connect(ctx.destination);
+  const freqData = new Uint8Array(analyser.frequencyBinCount);
+  let levelRaf = null;
+
+  const spokenText = normalizeForTTS(text);
 
   const url = `wss://api.deepgram.com/v2/speak?model=flux-alexis-en&encoding=linear16&sample_rate=${TTS_SAMPLE_RATE}`;
   // Browsers can't set headers on a WebSocket; Deepgram reads the token from the
@@ -34,7 +68,27 @@ export function streamSpeech(text, { onStart, onEnd, onError } = {}) {
   let started = false;
   let finished = false;
 
+  // rAF loop feeding normalized amplitude (0..1) to the visualizer.
+  const runLevelLoop = () => {
+    if (!onLevel) return;
+    const tick = () => {
+      analyser.getByteFrequencyData(freqData);
+      let sum = 0;
+      for (let i = 0; i < freqData.length; i++) sum += freqData[i];
+      const avg = sum / freqData.length / 255; // 0..1
+      onLevel(avg);
+      levelRaf = requestAnimationFrame(tick);
+    };
+    levelRaf = requestAnimationFrame(tick);
+  };
+  const stopLevelLoop = () => {
+    if (levelRaf) cancelAnimationFrame(levelRaf);
+    levelRaf = null;
+    onLevel?.(0);
+  };
+
   const teardown = () => {
+    stopLevelLoop();
     try {
       ws.close();
     } catch {}
@@ -51,6 +105,7 @@ export function streamSpeech(text, { onStart, onEnd, onError } = {}) {
     } catch {}
     const remainingMs = Math.max(0, (nextStartTime - ctx.currentTime) * 1000);
     setTimeout(() => {
+      stopLevelLoop();
       ctx.close().catch(() => {});
       onEnd?.();
     }, remainingMs + 120);
@@ -80,7 +135,7 @@ export function streamSpeech(text, { onStart, onEnd, onError } = {}) {
     buffer.getChannelData(0).set(float32);
     const src = ctx.createBufferSource();
     src.buffer = buffer;
-    src.connect(ctx.destination);
+    src.connect(analyser);
     const startAt = Math.max(ctx.currentTime, nextStartTime);
     src.start(startAt);
     nextStartTime = startAt + buffer.duration;
@@ -89,6 +144,7 @@ export function streamSpeech(text, { onStart, onEnd, onError } = {}) {
     if (!started) {
       started = true;
       onStart?.();
+      runLevelLoop();
     }
   };
 
@@ -96,7 +152,7 @@ export function streamSpeech(text, { onStart, onEnd, onError } = {}) {
     try {
       if (ctx.state === 'suspended') await ctx.resume();
     } catch {}
-    ws.send(JSON.stringify({ type: 'Speak', text }));
+    ws.send(JSON.stringify({ type: 'Speak', text: spokenText }));
     ws.send(JSON.stringify({ type: 'Flush' }));
   };
 
@@ -164,7 +220,11 @@ export async function startLiveTranscription({
 } = {}) {
   if (!DG_KEY) throw new Error('Missing VITE_DEEPGRAM_API_KEY');
 
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  // Echo cancellation keeps the mic from re-transcribing the AI's own TTS during
+  // continuous conversation (enables clean barge-in).
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+  });
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
   const audioCtx = new AudioCtx({ sampleRate: 16000 });
   const inRate = audioCtx.sampleRate;
