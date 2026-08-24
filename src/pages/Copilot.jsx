@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Sparkles, Send, Mic, PhoneOff, Volume2, VolumeX, User } from 'lucide-react';
+import { Sparkles, Send, Mic, MicOff, Volume2, VolumeX, User } from 'lucide-react';
 import { askClaude, localAnswer } from '../lib/copilot.js';
 import { startLiveTranscription, streamSpeech } from '../lib/deepgram.js';
 import { Button } from '../components/ui.jsx';
@@ -53,16 +53,22 @@ export default function Copilot() {
   const [sessionActive, setSessionActive] = useState(false);
   const [liveTranscript, setLiveTranscript] = useState('');
 
+  const [dictating, setDictating] = useState(false);
+
   const scrollRef = useRef(null);
-  const liveRef = useRef(null); // continuous STT controller
+  const liveRef = useRef(null); // continuous session STT controller
+  const dictRef = useRef(null); // separate dictation STT controller
+  const dictBaseRef = useRef(''); // input text captured before dictation began
   const ttsRef = useRef(null); // active streaming-TTS controller
   const levelRef = useRef(0); // latest TTS amplitude (0..1) for the orb
+  const speakResolveRef = useRef(null); // resolves the in-flight speak() promise
   const respondRef = useRef(null); // late-bound to break the init-order cycle
 
   // Live flags read inside async callbacks (avoid stale closures).
   const sessionRef = useRef(false);
   const thinkingRef = useRef(false); // awaiting Claude — ignore incoming finals
   const speakingRef = useRef(false); // TTS playing — a final means barge-in
+  const interruptedRef = useRef(false); // user barged in over the current reply
   const messagesRef = useRef(messages);
   const mutedRef = useRef(muted);
   messagesRef.current = messages;
@@ -75,47 +81,62 @@ export default function Copilot() {
   useEffect(() => {
     return () => {
       liveRef.current?.stop();
+      dictRef.current?.stop();
       ttsRef.current?.stop();
     };
   }, []);
 
-  // Speak text via Flux TTS streaming. Resolves when audio finishes (or muted).
-  const speak = useCallback(
-    (text) =>
-      new Promise((resolve) => {
-        if (mutedRef.current) {
-          resolve();
-          return;
-        }
-        speakingRef.current = true;
-        try {
-          ttsRef.current = streamSpeech(text, {
-            onStart: () => setStatus('speaking'),
-            onLevel: (v) => {
-              levelRef.current = v;
-            },
-            onEnd: () => {
-              speakingRef.current = false;
-              levelRef.current = 0;
-              ttsRef.current = null;
-              resolve();
-            },
-            onError: () => {
-              speakingRef.current = false;
-              levelRef.current = 0;
-              ttsRef.current = null;
-              resolve();
-            },
-          });
-        } catch {
-          speakingRef.current = false;
-          resolve();
-        }
-      }),
-    [],
-  );
+  // Fully tear down TTS playback and resolve any pending speak() promise so the
+  // awaiting respond() unblocks. Safe to call repeatedly.
+  const cutSpeech = useCallback(() => {
+    if (ttsRef.current) {
+      ttsRef.current.stop(); // closes WS, stops+disconnects all audio nodes
+      ttsRef.current = null;
+    }
+    speakingRef.current = false;
+    levelRef.current = 0;
+    const resolve = speakResolveRef.current;
+    speakResolveRef.current = null;
+    resolve?.();
+  }, []);
 
-  // Core turn: user utterance → Claude → spoken reply → back to listening/idle.
+  // Speak text via a FRESH Flux TTS WebSocket (never reused). Resolves when
+  // audio finishes naturally, or immediately when cut short / muted.
+  const speak = useCallback((text) => {
+    interruptedRef.current = false;
+    return new Promise((resolve) => {
+      if (mutedRef.current) {
+        resolve();
+        return;
+      }
+      speakResolveRef.current = resolve;
+      speakingRef.current = true;
+      const done = () => {
+        speakingRef.current = false;
+        levelRef.current = 0;
+        ttsRef.current = null;
+        if (speakResolveRef.current === resolve) {
+          speakResolveRef.current = null;
+          resolve();
+        }
+      };
+      try {
+        ttsRef.current = streamSpeech(text, {
+          onStart: () => setStatus('speaking'),
+          onLevel: (v) => {
+            levelRef.current = v;
+          },
+          onEnd: done,
+          onError: done,
+        });
+      } catch {
+        done();
+      }
+    });
+  }, []);
+
+  // Core turn: user utterance → Claude → spoken reply. Only COMPLETE replies are
+  // added to history; an interruption never poisons context.
   const respond = useCallback(
     async (text) => {
       const trimmed = text.trim();
@@ -129,30 +150,27 @@ export default function Copilot() {
 
       let reply;
       try {
-        reply = await askClaude(history, trimmed);
+        reply = await askClaude(history, trimmed); // full response, not streamed
       } catch {
         reply = localAnswer(trimmed);
       }
       thinkingRef.current = false;
+      // The reply is complete before we speak it, so recording it here can never
+      // store a partial/interrupted response.
       setMessages((m) => [...m, { role: 'assistant', content: reply }]);
 
       await speak(reply);
-      // Continuous mode loops straight back to listening; otherwise idle.
+
+      // If the user barged in, the new turn already owns the UI state — don't
+      // stomp it. Otherwise loop back to listening (session) or go idle.
+      if (interruptedRef.current) return;
       setStatus(sessionRef.current ? 'listening' : 'idle');
     },
     [speak],
   );
   respondRef.current = respond;
 
-  // Stop any in-flight TTS immediately (barge-in / interruption).
-  const cutSpeech = useCallback(() => {
-    if (ttsRef.current) {
-      ttsRef.current.stop();
-      ttsRef.current = null;
-    }
-    speakingRef.current = false;
-    levelRef.current = 0;
-  }, []);
+  // --- Session control (owned by the orb) ---------------------------------
 
   const startConversation = useCallback(async () => {
     sessionRef.current = true;
@@ -164,22 +182,24 @@ export default function Copilot() {
           if (!speakingRef.current && !thinkingRef.current) setStatus('listening');
         },
         onPartial: (t) => {
-          if (!thinkingRef.current) setLiveTranscript(t);
+          if (!thinkingRef.current && !speakingRef.current) setLiveTranscript(t);
         },
         onFinal: (t) => {
           const text = t.trim();
           if (!sessionRef.current || !text) return;
-          if (thinkingRef.current) return; // still waiting on Claude — skip
+          if (thinkingRef.current) return; // waiting on Claude — never interrupt that
           if (speakingRef.current) {
-            // Barge-in: ignore tiny blips (likely residual echo), else interrupt.
-            if (text.length < 3) return;
+            // Barge-in: ignore very short blips (likely residual echo), else
+            // hard-stop TTS and process ONLY the new input.
+            if (text.replace(/[^a-z0-9]/gi, '').length < 4) return;
+            interruptedRef.current = true;
             cutSpeech();
           }
           respondRef.current?.(text);
         },
         onError: () => {},
         onClose: () => {
-          if (sessionRef.current) setStatus((s) => (s === 'listening' ? 'idle' : s));
+          if (sessionRef.current) setStatus((st) => (st === 'listening' ? 'idle' : st));
         },
       });
     } catch {
@@ -196,15 +216,56 @@ export default function Copilot() {
     liveRef.current = null;
     cutSpeech();
     thinkingRef.current = false;
+    interruptedRef.current = false;
     setLiveTranscript('');
     setStatus('idle');
   }, [cutSpeech]);
+
+  const toggleSession = useCallback(() => {
+    if (sessionRef.current) endConversation();
+    else startConversation();
+  }, [startConversation, endConversation]);
+
+  // --- Dictation (owned by the mic button, independent of the session) -----
+
+  const stopDictation = useCallback(() => {
+    dictRef.current?.stop();
+    dictRef.current = null;
+    setDictating(false);
+  }, []);
+
+  const toggleDictation = useCallback(async () => {
+    if (dictRef.current) {
+      stopDictation();
+      return;
+    }
+    dictBaseRef.current = input ? input.trim() + ' ' : '';
+    setDictating(true);
+    try {
+      dictRef.current = await startLiveTranscription({
+        onOpen: () => {},
+        onPartial: (t) => setInput(dictBaseRef.current + t),
+        onFinal: (t) => {
+          dictBaseRef.current = (dictBaseRef.current + t).trim() + ' ';
+          setInput(dictBaseRef.current);
+        },
+        onError: () => stopDictation(),
+        onClose: () => setDictating(false),
+      });
+    } catch {
+      setDictating(false);
+      dictRef.current = null;
+    }
+  }, [input, stopDictation]);
 
   // Text / suggestion entry (works with or without an active voice session).
   const ask = useCallback(
     (text) => {
       if (thinkingRef.current) return;
-      cutSpeech(); // typing interrupts speech too
+      if (speakingRef.current) {
+        interruptedRef.current = true;
+        cutSpeech(); // typing interrupts speech too
+      }
       respond(text);
     },
     [cutSpeech, respond],
@@ -241,11 +302,23 @@ export default function Copilot() {
       {/* Centerpiece: orb + status, with suggestions or transcript below */}
       <div className="flex flex-1 flex-col items-center overflow-hidden px-6 py-6">
         <div className={`flex shrink-0 flex-col items-center gap-4 ${empty ? 'my-auto' : 'pt-4'}`}>
-          <AnimatedOrb status={status} getLevel={() => levelRef.current} />
+          {/* Orb is the primary conversation control — click to start/stop */}
+          <button
+            type="button"
+            onClick={toggleSession}
+            aria-label={sessionActive ? 'Stop conversation' : 'Start conversation'}
+            className="group rounded-full outline-none transition-transform focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:ring-offset-2 active:scale-95"
+          >
+            <AnimatedOrb status={status} getLevel={() => levelRef.current} />
+          </button>
           <div className="text-center">
             <div className="text-base font-semibold text-slate-800">{s.label}</div>
             <div className="mt-1 min-h-[18px] max-w-sm text-sm text-slate-400">
-              {status === 'listening' && liveTranscript ? liveTranscript : s.hint}
+              {status === 'listening' && liveTranscript
+                ? liveTranscript
+                : sessionActive
+                  ? 'Click orb to stop'
+                  : 'Click orb to start'}
             </div>
           </div>
 
@@ -323,18 +396,21 @@ export default function Copilot() {
             </div>
             <button
               type="button"
-              onClick={sessionActive ? endConversation : startConversation}
-              title={sessionActive ? 'End conversation' : 'Start voice conversation'}
-              className={`relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-all ${
-                sessionActive
-                  ? 'bg-rose-500 text-white shadow-sm shadow-rose-500/40 hover:bg-rose-600'
+              onClick={toggleDictation}
+              title="Dictate"
+              className={`group relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-all ${
+                dictating
+                  ? 'bg-brand-600 text-white shadow-sm shadow-brand-600/40 hover:bg-brand-700'
                   : 'bg-white text-slate-500 ring-1 ring-inset ring-slate-200 hover:text-brand-600 hover:ring-brand-300'
               }`}
             >
-              {sessionActive && (
-                <span className="absolute inset-0 animate-pulse-ring rounded-xl bg-rose-500/40" />
+              {dictating && (
+                <span className="absolute inset-0 animate-pulse-ring rounded-xl bg-brand-500/40" />
               )}
-              {sessionActive ? <PhoneOff size={17} /> : <Mic size={18} />}
+              {dictating ? <MicOff size={17} /> : <Mic size={18} />}
+              <span className="pointer-events-none absolute -top-8 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md bg-slate-900 px-2 py-1 text-[10px] font-medium text-white opacity-0 transition-opacity group-hover:opacity-100">
+                {dictating ? 'Stop dictation' : 'Dictate'}
+              </span>
             </button>
             <Button type="submit" size="lg" disabled={!input.trim()} className="h-10">
               <Send size={16} />
@@ -342,8 +418,10 @@ export default function Copilot() {
           </form>
           <p className="mt-2 text-center text-[11px] text-slate-400">
             {sessionActive
-              ? 'Continuous conversation active — tap the red button to end'
-              : 'AccountOS Copilot · Claude Sonnet 4.6 · Deepgram Flux STT + Flux TTS voice'}
+              ? 'Conversation active — click the orb to stop · mic dictates into the box'
+              : dictating
+                ? 'Dictating… speak, then click the mic to stop'
+                : 'Click the orb for hands-free voice · mic to dictate · or type'}
           </p>
         </div>
       </div>

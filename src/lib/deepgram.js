@@ -67,6 +67,7 @@ export function streamSpeech(text, { onStart, onEnd, onError, onLevel } = {}) {
   let carry = null; // leftover odd byte spanning two binary frames
   let started = false;
   let finished = false;
+  let stopped = false; // hard interrupt — ignore all further socket traffic
 
   // rAF loop feeding normalized amplitude (0..1) to the visualizer.
   const runLevelLoop = () => {
@@ -112,6 +113,7 @@ export function streamSpeech(text, { onStart, onEnd, onError, onLevel } = {}) {
   };
 
   const playChunk = (arrayBuffer) => {
+    if (stopped) return; // interrupted — do not schedule any more audio
     let bytes = new Uint8Array(arrayBuffer);
     if (carry) {
       const merged = new Uint8Array(carry.length + bytes.length);
@@ -157,6 +159,7 @@ export function streamSpeech(text, { onStart, onEnd, onError, onLevel } = {}) {
   };
 
   ws.onmessage = (evt) => {
+    if (stopped) return; // interrupted socket — drop everything
     if (typeof evt.data === 'string') {
       let msg;
       try {
@@ -173,19 +176,33 @@ export function streamSpeech(text, { onStart, onEnd, onError, onLevel } = {}) {
     playChunk(evt.data);
   };
 
-  ws.onerror = (e) => onError?.(e);
+  ws.onerror = (e) => {
+    if (!stopped) onError?.(e);
+  };
   ws.onclose = () => {
-    if (!finished) finish();
+    if (!finished && !stopped) finish();
   };
 
   return {
+    // Hard stop for interruption: silence immediately, disconnect every Web
+    // Audio node, and close the socket so no leftover chunks can play.
     stop() {
+      if (stopped) return;
+      stopped = true;
       finished = true;
+      stopLevelLoop();
       sources.forEach((s) => {
         try {
           s.stop();
         } catch {}
+        try {
+          s.disconnect();
+        } catch {}
       });
+      sources.length = 0;
+      try {
+        analyser.disconnect();
+      } catch {}
       teardown();
     },
   };
