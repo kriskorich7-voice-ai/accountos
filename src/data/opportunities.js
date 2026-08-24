@@ -18,7 +18,7 @@ export const opportunities = [
       'Daniel Rodriguez — Director of AI Platforms',
       'Sarah Mitchell — VP Customer Experience',
     ],
-    products: ['Voice Agent API', 'Flux STT', 'Aura-2 TTS'],
+    products: ['Voice Agent API', 'Flux STT', 'Flux TTS'],
   },
   {
     id: 'sales-voice',
@@ -50,7 +50,7 @@ export const opportunities = [
       'Content velocity is increasing and TTS can automate voiceover and localization workflows at scale.',
     nextStep: 'Stakeholder mapping in Marketing.',
     stakeholders: ['VP Marketing', 'Head of Content'],
-    products: ['Aura-2 TTS', 'Batch Transcription'],
+    products: ['Flux TTS', 'Batch Transcription'],
   },
 ];
 

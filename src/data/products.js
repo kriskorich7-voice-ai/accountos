@@ -14,7 +14,7 @@ export const products = [
   {
     id: 'tts',
     name: 'Text-to-Speech',
-    tagline: 'Aura-2 voices',
+    tagline: 'Flux TTS voices',
     status: 'Emerging',
     adoption: 34,
     growth: 38,

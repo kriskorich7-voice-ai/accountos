@@ -141,6 +141,57 @@ export function Sparkline({ data, color = '#6366f1', width = 96, height = 30 }) 
   );
 }
 
+// ---- Centered modal ---------------------------------------------------------
+
+export function Modal({ open, onClose, title, subtitle, icon: Icon, children, footer, size = 'md' }) {
+  useEffect(() => {
+    const onKey = (e) => e.key === 'Escape' && onClose();
+    if (open) document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
+
+  if (!open) return null;
+  const widths = { sm: 'max-w-md', md: 'max-w-lg', lg: 'max-w-2xl' };
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 sm:p-8">
+      <div
+        className="fixed inset-0 bg-slate-900/40 backdrop-blur-[2px] animate-fade-in"
+        onClick={onClose}
+      />
+      <div
+        className={`relative my-auto w-full ${widths[size]} rounded-2xl bg-white shadow-pop animate-fade-in`}
+      >
+        <div className="flex items-start justify-between border-b border-slate-100 px-6 py-4">
+          <div className="flex items-start gap-3 pr-4">
+            {Icon && (
+              <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-brand-50 text-brand-600">
+                <Icon size={18} />
+              </div>
+            )}
+            <div>
+              {subtitle && (
+                <div className="text-[11px] font-semibold uppercase tracking-wider text-brand-600">
+                  {subtitle}
+                </div>
+              )}
+              <h3 className="text-lg font-semibold text-slate-900">{title}</h3>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+            aria-label="Close"
+          >
+            <X size={18} />
+          </button>
+        </div>
+        <div className="max-h-[65vh] overflow-y-auto px-6 py-5">{children}</div>
+        {footer && <div className="border-t border-slate-100 px-6 py-4">{footer}</div>}
+      </div>
+    </div>
+  );
+}
+
 // ---- Slide-over drawer ------------------------------------------------------
 
 export function Drawer({ open, onClose, title, subtitle, children, footer }) {

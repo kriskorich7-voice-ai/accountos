@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { Sparkles, Send, Mic, Square, Volume2, VolumeX, User } from 'lucide-react';
 import { askClaude, localAnswer } from '../lib/copilot.js';
-import { transcribeAudio, synthesizeSpeech, hasDeepgram } from '../lib/deepgram.js';
+import { startLiveTranscription, synthesizeSpeech } from '../lib/deepgram.js';
 import { Button } from '../components/ui.jsx';
 
 const SUGGESTIONS = [
@@ -15,9 +15,9 @@ const SUGGESTIONS = [
 
 const STATUS = {
   idle: { label: 'Ready', dot: 'bg-slate-300' },
-  listening: { label: 'Listening', dot: 'bg-rose-500' },
-  thinking: { label: 'Thinking', dot: 'bg-amber-500' },
-  speaking: { label: 'Speaking', dot: 'bg-emerald-500' },
+  listening: { label: 'Listening…', dot: 'bg-rose-500' },
+  thinking: { label: 'Thinking…', dot: 'bg-amber-500' },
+  speaking: { label: 'Speaking…', dot: 'bg-emerald-500' },
 };
 
 function StatusPill({ status }) {
@@ -66,32 +66,45 @@ export default function Copilot() {
   const [status, setStatus] = useState('idle');
   const [muted, setMuted] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [liveTranscript, setLiveTranscript] = useState('');
 
   const scrollRef = useRef(null);
-  const mediaRecorderRef = useRef(null);
-  const chunksRef = useRef([]);
-  const audioRef = useRef(null);
+  const liveRef = useRef(null); // active STT controller
+  const audioCtxRef = useRef(null); // Web Audio context for TTS playback
+  const sourceRef = useRef(null); // active TTS buffer source
   const mutedRef = useRef(muted);
   mutedRef.current = muted;
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
-  }, [messages, status]);
+  }, [messages, status, liveTranscript]);
 
+  useEffect(() => {
+    return () => {
+      liveRef.current?.stop();
+      sourceRef.current?.stop?.();
+    };
+  }, []);
+
+  // Play Claude's reply through the Web Audio API using Flux TTS.
   const speak = useCallback(async (text) => {
-    if (mutedRef.current || !hasDeepgram) return;
+    if (mutedRef.current) return;
     try {
       setStatus('speaking');
-      const url = await synthesizeSpeech(text);
-      const audio = new Audio(url);
-      audioRef.current = audio;
-      audio.onended = () => {
-        setStatus('idle');
-        URL.revokeObjectURL(url);
-      };
-      audio.onerror = () => setStatus('idle');
-      await audio.play();
+      const audioData = await synthesizeSpeech(text);
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!audioCtxRef.current) audioCtxRef.current = new AudioCtx();
+      const ctx = audioCtxRef.current;
+      if (ctx.state === 'suspended') await ctx.resume();
+      const buffer = await ctx.decodeAudioData(audioData.slice(0));
+      const src = ctx.createBufferSource();
+      src.buffer = buffer;
+      src.connect(ctx.destination);
+      sourceRef.current = src;
+      src.onended = () => setStatus('idle');
+      src.start();
     } catch {
+      // Playback unavailable — silently return to idle.
       setStatus('idle');
     }
   }, []);
@@ -101,6 +114,7 @@ export default function Copilot() {
       const trimmed = text.trim();
       if (!trimmed || busy) return;
       setInput('');
+      setLiveTranscript('');
       setBusy(true);
       const history = messages;
       setMessages((m) => [...m, { role: 'user', content: trimmed }]);
@@ -117,43 +131,43 @@ export default function Copilot() {
       setMessages((m) => [...m, { role: 'assistant', content: reply }]);
       setBusy(false);
       await speak(reply);
-      setStatus((s) => (s === 'speaking' ? s : 'idle'));
     },
     [messages, busy, speak],
   );
 
-  const startRecording = useCallback(async () => {
-    if (audioRef.current) audioRef.current.pause();
+  const stopListening = useCallback(() => {
+    liveRef.current?.stop();
+    liveRef.current = null;
+  }, []);
+
+  const startListening = useCallback(async () => {
+    // Stop any in-flight playback so the mic doesn't capture it.
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mr = new MediaRecorder(stream);
-      chunksRef.current = [];
-      mr.ondataavailable = (e) => e.data.size > 0 && chunksRef.current.push(e.data);
-      mr.onstop = async () => {
-        stream.getTracks().forEach((t) => t.stop());
-        const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
-        setStatus('thinking');
-        try {
-          const transcript = await transcribeAudio(blob);
-          if (transcript) submit(transcript);
-          else setStatus('idle');
-        } catch {
+      sourceRef.current?.stop();
+    } catch {}
+    setLiveTranscript('');
+    try {
+      liveRef.current = await startLiveTranscription({
+        onOpen: () => setStatus('listening'),
+        onPartial: (t) => setLiveTranscript(t),
+        onFinal: (t) => {
+          stopListening();
+          submit(t);
+        },
+        onError: () => {
+          stopListening();
           setStatus('idle');
-        }
-      };
-      mediaRecorderRef.current = mr;
-      mr.start();
-      setStatus('listening');
+        },
+        onClose: () => {
+          setStatus((s) => (s === 'listening' ? 'idle' : s));
+        },
+      });
     } catch {
       setStatus('idle');
     }
-  }, [submit]);
+  }, [submit, stopListening]);
 
-  const stopRecording = useCallback(() => {
-    mediaRecorderRef.current?.state === 'recording' && mediaRecorderRef.current.stop();
-  }, []);
-
-  const toggleMic = () => (status === 'listening' ? stopRecording() : startRecording());
+  const toggleMic = () => (status === 'listening' ? stopListening() : startListening());
   const empty = messages.length === 0;
 
   return (
@@ -193,8 +207,7 @@ export default function Copilot() {
                 What can I tell you about Acme?
               </h2>
               <p className="mt-1.5 max-w-md text-sm text-slate-500">
-                Ask about account health, expansion, risks, or use the mic for a voice conversation.
-                {!hasDeepgram && ' (Set VITE_DEEPGRAM_API_KEY to enable voice.)'}
+                Ask about account health, expansion, risks, or tap the mic for a voice conversation.
               </p>
               <div className="mt-7 grid w-full max-w-xl gap-2 sm:grid-cols-2">
                 {SUGGESTIONS.map((s) => (
@@ -231,6 +244,16 @@ export default function Copilot() {
               )}
             </div>
           )}
+
+          {/* Live transcript while listening */}
+          {status === 'listening' && (
+            <div className="mt-5 flex justify-end animate-fade-in">
+              <div className="flex items-center gap-2 rounded-2xl rounded-tr-sm bg-brand-600/10 px-4 py-2.5 text-sm text-brand-800 ring-1 ring-inset ring-brand-200">
+                <Mic size={14} className="text-rose-500" />
+                {liveTranscript || <span className="italic text-brand-500">Listening…</span>}
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -260,23 +283,26 @@ export default function Copilot() {
           >
             <div className="flex flex-1 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 shadow-sm focus-within:border-brand-400 focus-within:ring-2 focus-within:ring-brand-100">
               <input
-                value={input}
+                value={status === 'listening' ? liveTranscript : input}
                 onChange={(e) => setInput(e.target.value)}
-                placeholder="Ask about Acme Corporation…"
-                className="flex-1 bg-transparent text-sm text-slate-800 outline-none placeholder:text-slate-400"
+                placeholder={status === 'listening' ? 'Listening…' : 'Ask about Acme Corporation…'}
+                disabled={status === 'listening'}
+                className="flex-1 bg-transparent text-sm text-slate-800 outline-none placeholder:text-slate-400 disabled:text-slate-500"
               />
             </div>
             <button
               type="button"
               onClick={toggleMic}
-              disabled={busy && status !== 'listening'}
-              title={hasDeepgram ? 'Voice input' : 'Set VITE_DEEPGRAM_API_KEY to enable voice'}
-              className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-all disabled:opacity-50 ${
+              title="Voice input"
+              className={`relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-all ${
                 status === 'listening'
                   ? 'bg-rose-500 text-white shadow-sm shadow-rose-500/40'
                   : 'bg-white text-slate-500 ring-1 ring-inset ring-slate-200 hover:text-brand-600 hover:ring-brand-300'
               }`}
             >
+              {status === 'listening' && (
+                <span className="absolute inset-0 animate-pulse-ring rounded-xl bg-rose-500/40" />
+              )}
               {status === 'listening' ? <Square size={16} /> : <Mic size={18} />}
             </button>
             <Button type="submit" size="lg" disabled={!input.trim() || busy} className="h-10">
@@ -284,7 +310,7 @@ export default function Copilot() {
             </Button>
           </form>
           <p className="mt-2 text-center text-[11px] text-slate-400">
-            AccountOS Copilot · Claude Sonnet 4.6 · Deepgram Aura-2 voice
+            AccountOS Copilot · Claude Sonnet 4.6 · Deepgram Flux STT + Flux TTS voice
           </p>
         </div>
       </div>

@@ -6,6 +6,9 @@ import {
   ListChecks,
   Sparkles,
   ChevronRight,
+  CalendarDays,
+  Inbox,
+  Radio,
 } from 'lucide-react';
 
 const nav = [
@@ -13,16 +16,24 @@ const nav = [
   { to: '/account/acme', label: 'Accounts', icon: Building2 },
   { to: '/intelligence', label: 'Intelligence', icon: BrainCircuit },
   { to: '/actions', label: 'Actions', icon: ListChecks },
-  { to: '/copilot', label: 'AI Copilot', icon: Sparkles },
+  { to: '/today', label: 'Today', icon: CalendarDays },
+  { to: '/inbox', label: 'Inbox', icon: Inbox, badge: '5' },
+  { to: '/signals', label: 'Signals', icon: Radio, badge: '5' },
+  { to: '/copilot', label: 'AI Copilot', icon: Sparkles, live: true },
 ];
 
+// 10 connected sources, each with its own last-sync timestamp.
 const sources = [
-  'Salesforce',
-  'Deepgram Usage API',
-  'Product Analytics',
-  'Support System',
-  'Billing',
-  'Slack',
+  { name: 'Salesforce', sync: '14s ago' },
+  { name: 'Deepgram Usage API', sync: '14s ago' },
+  { name: 'Product Analytics', sync: '14s ago' },
+  { name: 'Support System', sync: '14s ago' },
+  { name: 'Billing', sync: '14s ago' },
+  { name: 'Slack', sync: '14s ago' },
+  { name: 'Gmail', sync: '2m ago' },
+  { name: 'Google Calendar', sync: '14s ago' },
+  { name: 'Notion', sync: '5m ago' },
+  { name: 'Avoma', sync: '8m ago' },
 ];
 
 export default function Sidebar() {
@@ -58,8 +69,8 @@ export default function Sidebar() {
       </div>
 
       {/* Nav */}
-      <nav className="mt-2 flex-1 space-y-1 px-3">
-        {nav.map(({ to, label, icon: Icon, end }) => {
+      <nav className="mt-1 flex-1 space-y-0.5 overflow-y-auto px-3">
+        {nav.map(({ to, label, icon: Icon, end, badge, live }) => {
           const forceActive = label === 'Accounts' && accountActive;
           return (
             <NavLink
@@ -85,9 +96,14 @@ export default function Sidebar() {
                     }
                   />
                   {label}
-                  {label === 'AI Copilot' && (
+                  {live && (
                     <span className="ml-auto rounded bg-brand-500/20 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-brand-300">
                       Live
+                    </span>
+                  )}
+                  {badge && (
+                    <span className="ml-auto flex h-5 min-w-5 items-center justify-center rounded-full bg-slate-700/70 px-1.5 text-[10px] font-bold text-slate-200">
+                      {badge}
                     </span>
                   )}
                 </>
@@ -98,7 +114,7 @@ export default function Sidebar() {
       </nav>
 
       {/* Connected sources */}
-      <div className="px-4 pb-3">
+      <div className="px-4 pb-3 pt-2">
         <div className="mb-2 flex items-center justify-between px-1">
           <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
             Connected Sources
@@ -108,17 +124,17 @@ export default function Sidebar() {
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
               <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-400" />
             </span>
-            Live
+            10 live
           </span>
         </div>
-        <div className="space-y-0.5 rounded-lg bg-white/[0.03] p-2 ring-1 ring-inset ring-white/5">
+        <div className="max-h-44 space-y-0.5 overflow-y-auto rounded-lg bg-white/[0.03] p-2 ring-1 ring-inset ring-white/5">
           {sources.map((s) => (
-            <div key={s} className="flex items-center justify-between px-1 py-0.5">
+            <div key={s.name} className="flex items-center justify-between px-1 py-0.5">
               <div className="flex items-center gap-2">
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                <span className="text-[11px] text-slate-400">{s}</span>
+                <span className="text-[11px] text-slate-400">{s.name}</span>
               </div>
-              <span className="text-[10px] text-slate-600">14s ago</span>
+              <span className="text-[10px] text-slate-600">{s.sync}</span>
             </div>
           ))}
         </div>

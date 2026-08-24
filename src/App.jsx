@@ -5,6 +5,9 @@ import AccountOverview from './pages/AccountOverview.jsx';
 import Adoption from './pages/Adoption.jsx';
 import Intelligence from './pages/Intelligence.jsx';
 import Actions from './pages/Actions.jsx';
+import Today from './pages/Today.jsx';
+import InboxPage from './pages/Inbox.jsx';
+import Signals from './pages/Signals.jsx';
 import Copilot from './pages/Copilot.jsx';
 
 export default function App() {
@@ -21,6 +24,9 @@ export default function App() {
           <Route path="/adoption" element={<Adoption />} />
           <Route path="/intelligence" element={<Intelligence />} />
           <Route path="/actions" element={<Actions />} />
+          <Route path="/today" element={<Today />} />
+          <Route path="/inbox" element={<InboxPage />} />
+          <Route path="/signals" element={<Signals />} />
           <Route path="/copilot" element={<Copilot />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
