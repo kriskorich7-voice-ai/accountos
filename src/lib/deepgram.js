@@ -1,5 +1,6 @@
 // Deepgram STT + TTS helpers. Uses VITE_DEEPGRAM_API_KEY.
-// TTS: Flux (flux-alexis-en) streamed over the v2 speak WebSocket.
+// TTS: Flux (flux-alexis-en) over a persistent v2 speak WebSocket that stays
+//      open for the whole conversation and uses the Interrupt protocol.
 // STT: Flux streaming (flux-general-en) via the v2 listen WebSocket.
 
 const DG_KEY = import.meta.env.VITE_DEEPGRAM_API_KEY;
@@ -33,51 +34,57 @@ export function normalizeForTTS(text) {
     .trim();
 }
 
-// Stream speech from Deepgram Flux TTS over a WebSocket and play it gaplessly
-// through the Web Audio API as linear16 chunks arrive. Lower latency than the
-// REST endpoint since playback starts on the first chunk. An AnalyserNode is
-// tapped so callers can drive a visualizer from real-time amplitude.
+// Persistent Flux TTS session over a SINGLE WebSocket that stays open for the
+// whole conversation (Interrupt does not reset the voice, so the connection is
+// reused for voice consistency). A session-wide playback clock advances
+// monotonically and is the offset we hand to the Interrupt message.
 //
-// callbacks: { onStart, onEnd, onError, onLevel(0..1) }
-// Returns a controller with stop().
-export function streamSpeech(text, { onStart, onEnd, onError, onLevel } = {}) {
+// callbacks: { onStart, onLevel(0..1), onError }
+// Returns a controller: speak(text) -> Promise<{interrupted, textSpoken, noAudio}>,
+//                       interrupt(), isSpeaking(), playbackMs(), close().
+export function createSpeechSession({ onStart, onLevel, onError } = {}) {
   if (!DG_KEY) throw new Error('Missing VITE_DEEPGRAM_API_KEY');
 
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
-  const ctx = new AudioCtx({ sampleRate: TTS_SAMPLE_RATE });
+  const audioContext = new AudioCtx({ sampleRate: TTS_SAMPLE_RATE });
 
-  // Analyser taps the graph: sources → analyser → destination.
-  const analyser = ctx.createAnalyser();
+  // Analyser feeds the orb visualizer: source → analyser → destination.
+  const analyser = audioContext.createAnalyser();
   analyser.fftSize = 256;
   analyser.smoothingTimeConstant = 0.8;
-  analyser.connect(ctx.destination);
+  analyser.connect(audioContext.destination);
   const freqData = new Uint8Array(analyser.frequencyBinCount);
-  let levelRaf = null;
-
-  const spokenText = normalizeForTTS(text);
 
   const url = `wss://api.deepgram.com/v2/speak?model=flux-alexis-en&encoding=linear16&sample_rate=${TTS_SAMPLE_RATE}`;
-  // Browsers can't set headers on a WebSocket; Deepgram reads the token from the
-  // Sec-WebSocket-Protocol handshake, expressed here as the sub-protocol array.
+  // Token via the Sec-WebSocket-Protocol handshake (browsers can't set headers).
   const ws = new WebSocket(url, ['token', DG_KEY]);
   ws.binaryType = 'arraybuffer';
 
-  const sources = [];
-  let nextStartTime = 0; // AudioContext time cursor for gapless scheduling
-  let carry = null; // leftover odd byte spanning two binary frames
-  let started = false;
-  let finished = false;
-  let stopped = false; // hard interrupt — ignore all further socket traffic
+  // ---- Session-wide state (NEVER reset per turn) --------------------------
+  let sessionPlaybackMs = 0; // monotonic playback clock for Interrupt offset
+  let isInterruptInProgress = false;
 
-  // rAF loop feeding normalized amplitude (0..1) to the visualizer.
-  const runLevelLoop = () => {
-    if (!onLevel) return;
+  // ---- Audio queue --------------------------------------------------------
+  const audioQueue = [];
+  let isPlayingAudio = false;
+  let currentSource = null;
+  let carry = null; // leftover odd byte spanning two binary frames
+
+  // ---- Per-utterance state ------------------------------------------------
+  let pending = null; // { resolve } for the in-flight speak()
+  let flushReceived = false;
+  let onStartFired = false;
+  let closed = false;
+
+  // ---- Amplitude loop for the orb ----------------------------------------
+  let levelRaf = null;
+  const startLevelLoop = () => {
+    if (!onLevel || levelRaf) return;
     const tick = () => {
       analyser.getByteFrequencyData(freqData);
       let sum = 0;
       for (let i = 0; i < freqData.length; i++) sum += freqData[i];
-      const avg = sum / freqData.length / 255; // 0..1
-      onLevel(avg);
+      onLevel(sum / freqData.length / 255);
       levelRaf = requestAnimationFrame(tick);
     };
     levelRaf = requestAnimationFrame(tick);
@@ -88,32 +95,61 @@ export function streamSpeech(text, { onStart, onEnd, onError, onLevel } = {}) {
     onLevel?.(0);
   };
 
-  const teardown = () => {
-    stopLevelLoop();
-    try {
-      ws.close();
-    } catch {}
-    ctx.close().catch(() => {});
+  const resolvePending = (result) => {
+    const p = pending;
+    pending = null;
+    if (p) p.resolve(result);
   };
 
-  // Called when the server signals AudioDone (or the socket closes). Waits for
-  // any already-scheduled audio to finish, then reports completion.
-  const finish = () => {
-    if (finished) return;
-    finished = true;
-    try {
-      ws.close();
-    } catch {}
-    const remainingMs = Math.max(0, (nextStartTime - ctx.currentTime) * 1000);
-    setTimeout(() => {
+  // Play queued chunks strictly sequentially so the session clock stays exact.
+  const playNext = () => {
+    if (closed || isInterruptInProgress) {
+      isPlayingAudio = false;
+      return;
+    }
+    if (audioQueue.length === 0) {
+      isPlayingAudio = false;
       stopLevelLoop();
-      ctx.close().catch(() => {});
-      onEnd?.();
-    }, remainingMs + 120);
+      if (flushReceived && pending) resolvePending({ interrupted: false, textSpoken: null });
+      return;
+    }
+    isPlayingAudio = true;
+    const chunk = audioQueue.shift(); // even-length Uint8Array, offset 0
+    const samples = chunk.length / 2;
+    const durationMs = (samples / TTS_SAMPLE_RATE) * 1000; // (len/2)/24000*1000
+
+    const audioBuffer = audioContext.createBuffer(1, samples, TTS_SAMPLE_RATE);
+    const float32 = new Float32Array(samples);
+    const int16 = new Int16Array(chunk.buffer, chunk.byteOffset, samples);
+    for (let i = 0; i < samples; i++) float32[i] = int16[i] / 32768;
+    audioBuffer.copyToChannel(float32, 0);
+
+    const source = audioContext.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(analyser);
+    currentSource = source;
+
+    if (!onStartFired) {
+      onStartFired = true;
+      onStart?.();
+      startLevelLoop();
+    }
+
+    source.onended = () => {
+      sessionPlaybackMs += durationMs; // advance the monotonic clock
+      if (currentSource === source) currentSource = null;
+      playNext();
+    };
+    try {
+      source.start();
+    } catch {
+      sessionPlaybackMs += durationMs;
+      playNext();
+    }
   };
 
-  const playChunk = (arrayBuffer) => {
-    if (stopped) return; // interrupted — do not schedule any more audio
+  const enqueue = (arrayBuffer) => {
+    if (isInterruptInProgress || closed) return; // drop frames mid-interrupt
     let bytes = new Uint8Array(arrayBuffer);
     if (carry) {
       const merged = new Uint8Array(carry.length + bytes.length);
@@ -122,44 +158,33 @@ export function streamSpeech(text, { onStart, onEnd, onError, onLevel } = {}) {
       bytes = merged;
       carry = null;
     }
-    // linear16 is 2 bytes/sample — hold back a trailing odd byte for next frame.
     if (bytes.length % 2 !== 0) {
       carry = bytes.slice(bytes.length - 1);
       bytes = bytes.slice(0, bytes.length - 1);
     }
     if (bytes.length === 0) return;
-
-    const int16 = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.length / 2);
-    const float32 = new Float32Array(int16.length);
-    for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
-
-    const buffer = ctx.createBuffer(1, float32.length, TTS_SAMPLE_RATE);
-    buffer.getChannelData(0).set(float32);
-    const src = ctx.createBufferSource();
-    src.buffer = buffer;
-    src.connect(analyser);
-    const startAt = Math.max(ctx.currentTime, nextStartTime);
-    src.start(startAt);
-    nextStartTime = startAt + buffer.duration;
-    sources.push(src);
-
-    if (!started) {
-      started = true;
-      onStart?.();
-      runLevelLoop();
-    }
+    audioQueue.push(new Uint8Array(bytes)); // fresh, aligned copy
+    if (!isPlayingAudio) playNext();
   };
 
-  ws.onopen = async () => {
-    try {
-      if (ctx.state === 'suspended') await ctx.resume();
-    } catch {}
-    ws.send(JSON.stringify({ type: 'Speak', text: spokenText }));
-    ws.send(JSON.stringify({ type: 'Flush' }));
+  const clearAudioQueue = () => {
+    audioQueue.length = 0;
+    isPlayingAudio = false;
+    carry = null;
+    if (currentSource) {
+      try {
+        currentSource.stop();
+      } catch {}
+      try {
+        currentSource.disconnect();
+      } catch {}
+      currentSource = null;
+    }
+    stopLevelLoop();
   };
 
   ws.onmessage = (evt) => {
-    if (stopped) return; // interrupted socket — drop everything
+    if (closed) return;
     if (typeof evt.data === 'string') {
       let msg;
       try {
@@ -167,43 +192,115 @@ export function streamSpeech(text, { onStart, onEnd, onError, onLevel } = {}) {
       } catch {
         return;
       }
-      // AudioDone marks the end of synthesized audio for the flushed text.
-      if (msg.type === 'AudioDone' || msg.type === 'Done' || msg.type === 'Close') {
-        finish();
+      const type = msg.type;
+
+      if (type === 'SpeechInterrupted') {
+        isInterruptInProgress = false;
+        const textSpoken = msg.text_spoken ?? msg.text ?? '';
+        resolvePending({ interrupted: true, textSpoken });
+        return;
       }
-      return;
+
+      if (type === 'Warning') {
+        const code = `${msg.warn_code || msg.code || msg.description || ''}`;
+        // Another Interrupt already in flight — ignore, don't send more.
+        if (/INTERRUPT_IN_PROGRESS/i.test(code)) return;
+        // Interrupted before any audio was produced — skip SpeechInterrupted
+        // handling and let the caller go straight to listening.
+        if (/NO_AUDIO_GENERATED/i.test(code)) {
+          isInterruptInProgress = false;
+          resolvePending({ interrupted: true, textSpoken: '', noAudio: true });
+          return;
+        }
+        return;
+      }
+
+      // Natural end of the flushed utterance.
+      if (type === 'AudioDone' || type === 'Flushed' || type === 'Done') {
+        flushReceived = true;
+        if (!isPlayingAudio && audioQueue.length === 0 && pending) {
+          resolvePending({ interrupted: false, textSpoken: null });
+        }
+        return;
+      }
+      return; // Metadata / Cleared / etc.
     }
-    playChunk(evt.data);
+    enqueue(evt.data);
   };
 
   ws.onerror = (e) => {
-    if (!stopped) onError?.(e);
-  };
-  ws.onclose = () => {
-    if (!finished && !stopped) finish();
+    if (!closed) onError?.(e);
   };
 
+  const wsReady = () =>
+    new Promise((res) => {
+      if (ws.readyState === WebSocket.OPEN) return res();
+      ws.addEventListener('open', () => res(), { once: true });
+    });
+
   return {
-    // Hard stop for interruption: silence immediately, disconnect every Web
-    // Audio node, and close the socket so no leftover chunks can play.
-    stop() {
-      if (stopped) return;
-      stopped = true;
-      finished = true;
-      stopLevelLoop();
-      sources.forEach((s) => {
+    // Synthesize `text` on the SAME socket. Resolves on natural completion or on
+    // SpeechInterrupted (barge-in). Does NOT reset the session playback clock.
+    async speak(text) {
+      const spoken = normalizeForTTS(text);
+      flushReceived = false;
+      onStartFired = false;
+      carry = null;
+      if (audioContext.state === 'suspended') {
         try {
-          s.stop();
+          await audioContext.resume();
         } catch {}
+      }
+      await wsReady();
+      return new Promise((resolve) => {
+        pending = { resolve };
         try {
-          s.disconnect();
-        } catch {}
+          ws.send(JSON.stringify({ type: 'Speak', text: spoken }));
+          ws.send(JSON.stringify({ type: 'Flush' }));
+        } catch {
+          resolvePending({ interrupted: false, textSpoken: null });
+        }
       });
-      sources.length = 0;
+    },
+
+    // Barge-in: stop local audio immediately and send Interrupt (same socket)
+    // with the session-wide playback offset. Do not send a second Interrupt
+    // while one is in progress.
+    interrupt() {
+      if (isInterruptInProgress || closed) return;
+      isInterruptInProgress = true;
+      clearAudioQueue();
+      try {
+        ws.send(
+          JSON.stringify({
+            type: 'Interrupt',
+            playback_offset: { type: 'time_ms', value: Math.round(sessionPlaybackMs) },
+          }),
+        );
+      } catch {}
+    },
+
+    isSpeaking() {
+      return isPlayingAudio || pending != null;
+    },
+    playbackMs() {
+      return sessionPlaybackMs;
+    },
+
+    // Only called when the whole conversation ends (orb clicked to stop).
+    close() {
+      if (closed) return;
+      closed = true;
+      clearAudioQueue();
+      stopLevelLoop();
       try {
         analyser.disconnect();
       } catch {}
-      teardown();
+      try {
+        ws.close();
+      } catch {}
+      audioContext.close().catch(() => {});
+      if (pending) resolvePending({ interrupted: false, textSpoken: null, closed: true });
     },
   };
 }

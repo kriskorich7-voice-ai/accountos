@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { Sparkles, Send, Mic, MicOff, Volume2, VolumeX, User } from 'lucide-react';
 import { askClaude, localAnswer } from '../lib/copilot.js';
-import { startLiveTranscription, streamSpeech } from '../lib/deepgram.js';
+import { startLiveTranscription, createSpeechSession } from '../lib/deepgram.js';
 import { Button } from '../components/ui.jsx';
 import AnimatedOrb from '../components/AnimatedOrb.jsx';
 
@@ -59,16 +59,15 @@ export default function Copilot() {
   const liveRef = useRef(null); // continuous session STT controller
   const dictRef = useRef(null); // separate dictation STT controller
   const dictBaseRef = useRef(''); // input text captured before dictation began
-  const ttsRef = useRef(null); // active streaming-TTS controller
+  const ttsRef = useRef(null); // persistent Flux TTS session (one WS per convo)
   const levelRef = useRef(0); // latest TTS amplitude (0..1) for the orb
-  const speakResolveRef = useRef(null); // resolves the in-flight speak() promise
   const respondRef = useRef(null); // late-bound to break the init-order cycle
+  const pendingInputRef = useRef(null); // new user input captured during a barge-in
 
   // Live flags read inside async callbacks (avoid stale closures).
   const sessionRef = useRef(false);
   const thinkingRef = useRef(false); // awaiting Claude — ignore incoming finals
-  const speakingRef = useRef(false); // TTS playing — a final means barge-in
-  const interruptedRef = useRef(false); // user barged in over the current reply
+  const speakingRef = useRef(false); // TTS audio playing — a signal means barge-in
   const messagesRef = useRef(messages);
   const mutedRef = useRef(muted);
   messagesRef.current = messages;
@@ -82,61 +81,59 @@ export default function Copilot() {
     return () => {
       liveRef.current?.stop();
       dictRef.current?.stop();
-      ttsRef.current?.stop();
+      ttsRef.current?.close();
     };
   }, []);
 
-  // Fully tear down TTS playback and resolve any pending speak() promise so the
-  // awaiting respond() unblocks. Safe to call repeatedly.
-  const cutSpeech = useCallback(() => {
-    if (ttsRef.current) {
-      ttsRef.current.stop(); // closes WS, stops+disconnects all audio nodes
-      ttsRef.current = null;
-    }
-    speakingRef.current = false;
-    levelRef.current = 0;
-    const resolve = speakResolveRef.current;
-    speakResolveRef.current = null;
-    resolve?.();
-  }, []);
-
-  // Speak text via a FRESH Flux TTS WebSocket (never reused). Resolves when
-  // audio finishes naturally, or immediately when cut short / muted.
-  const speak = useCallback((text) => {
-    interruptedRef.current = false;
-    return new Promise((resolve) => {
-      if (mutedRef.current) {
-        resolve();
-        return;
-      }
-      speakResolveRef.current = resolve;
-      speakingRef.current = true;
-      const done = () => {
-        speakingRef.current = false;
-        levelRef.current = 0;
-        ttsRef.current = null;
-        if (speakResolveRef.current === resolve) {
-          speakResolveRef.current = null;
-          resolve();
-        }
-      };
-      try {
-        ttsRef.current = streamSpeech(text, {
-          onStart: () => setStatus('speaking'),
-          onLevel: (v) => {
-            levelRef.current = v;
-          },
-          onEnd: done,
-          onError: done,
-        });
-      } catch {
-        done();
-      }
+  // Lazily create the persistent TTS session (a single WebSocket kept open for
+  // voice consistency). Reused across turns; only closed when the convo ends.
+  const ensureTts = useCallback(() => {
+    if (ttsRef.current) return ttsRef.current;
+    ttsRef.current = createSpeechSession({
+      onStart: () => setStatus('speaking'),
+      onLevel: (v) => {
+        levelRef.current = v;
+      },
+      onError: () => {},
     });
+    return ttsRef.current;
   }, []);
 
-  // Core turn: user utterance → Claude → spoken reply. Only COMPLETE replies are
-  // added to history; an interruption never poisons context.
+  // Speak text on the SAME TTS socket. Resolves with the protocol result:
+  // { interrupted, textSpoken, noAudio }. Outside a session it's a one-shot
+  // connection closed on completion.
+  const speak = useCallback(
+    async (text) => {
+      if (mutedRef.current) return { interrupted: false, textSpoken: text };
+      const tts = ensureTts();
+      speakingRef.current = true;
+      let result;
+      try {
+        result = await tts.speak(text);
+      } catch {
+        result = { interrupted: false, textSpoken: null };
+      }
+      speakingRef.current = false;
+      levelRef.current = 0;
+      // No active session → this was a transient connection; close it.
+      if (!sessionRef.current && ttsRef.current) {
+        ttsRef.current.close();
+        ttsRef.current = null;
+      }
+      return result;
+    },
+    [ensureTts],
+  );
+
+  // Immediate barge-in: stop audio and send Interrupt on the SAME socket. The
+  // awaiting speak() resolves via SpeechInterrupted.
+  const interruptSpeech = useCallback(() => {
+    speakingRef.current = false; // block repeat triggers from further partials
+    ttsRef.current?.interrupt();
+  }, []);
+
+  // Core turn: user utterance → Claude → spoken reply. History only ever records
+  // COMPLETE replies (natural finish) or the actual text_spoken on interruption.
   const respond = useCallback(
     async (text) => {
       const trimmed = text.trim();
@@ -155,16 +152,31 @@ export default function Copilot() {
         reply = localAnswer(trimmed);
       }
       thinkingRef.current = false;
-      // The reply is complete before we speak it, so recording it here can never
-      // store a partial/interrupted response.
-      setMessages((m) => [...m, { role: 'assistant', content: reply }]);
 
-      await speak(reply);
+      const result = await speak(reply);
 
-      // If the user barged in, the new turn already owns the UI state — don't
-      // stomp it. Otherwise loop back to listening (session) or go idle.
-      if (interruptedRef.current) return;
-      setStatus(sessionRef.current ? 'listening' : 'idle');
+      if (result.interrupted) {
+        // Record only what was actually spoken as a partial assistant turn.
+        // NO_AUDIO_GENERATED → nothing was said, so add no assistant turn.
+        if (!result.noAudio) {
+          const partial =
+            result.textSpoken && result.textSpoken.trim() ? result.textSpoken.trim() : '[interrupted]';
+          setMessages((m) => [...m, { role: 'assistant', content: partial }]);
+        }
+      } else {
+        setMessages((m) => [...m, { role: 'assistant', content: reply }]);
+      }
+
+      // A barge-in captured new user input — process it next (keeps ordering:
+      // partial assistant turn is already recorded above).
+      const next = pendingInputRef.current;
+      if (next) {
+        pendingInputRef.current = null;
+        respondRef.current?.(next);
+        return;
+      }
+      // Don't stomp a turn that has already started thinking.
+      if (!thinkingRef.current) setStatus(sessionRef.current ? 'listening' : 'idle');
     },
     [speak],
   );
@@ -176,24 +188,32 @@ export default function Copilot() {
     sessionRef.current = true;
     setSessionActive(true);
     setLiveTranscript('');
+    ensureTts(); // open the persistent TTS socket up front
     try {
       liveRef.current = await startLiveTranscription({
         onOpen: () => {
           if (!speakingRef.current && !thinkingRef.current) setStatus('listening');
         },
         onPartial: (t) => {
-          if (!thinkingRef.current && !speakingRef.current) setLiveTranscript(t);
+          const text = t.trim();
+          if (speakingRef.current) {
+            // Speech detected while TTS plays → barge-in as soon as it's real
+            // (ignore tiny blips that are likely residual echo).
+            if (text.replace(/[^a-z0-9]/gi, '').length >= 3) interruptSpeech();
+          } else if (!thinkingRef.current) {
+            setLiveTranscript(text);
+          }
         },
         onFinal: (t) => {
           const text = t.trim();
           if (!sessionRef.current || !text) return;
           if (thinkingRef.current) return; // waiting on Claude — never interrupt that
           if (speakingRef.current) {
-            // Barge-in: ignore very short blips (likely residual echo), else
-            // hard-stop TTS and process ONLY the new input.
-            if (text.replace(/[^a-z0-9]/gi, '').length < 4) return;
-            interruptedRef.current = true;
-            cutSpeech();
+            // Final beat the partial trigger — stash input, interrupt, and let
+            // the interrupted turn hand off to it (preserves message order).
+            pendingInputRef.current = text;
+            interruptSpeech();
+            return;
           }
           respondRef.current?.(text);
         },
@@ -207,19 +227,22 @@ export default function Copilot() {
       setSessionActive(false);
       setStatus('idle');
     }
-  }, [cutSpeech]);
+  }, [ensureTts, interruptSpeech]);
 
   const endConversation = useCallback(() => {
     sessionRef.current = false;
     setSessionActive(false);
     liveRef.current?.stop();
     liveRef.current = null;
-    cutSpeech();
+    ttsRef.current?.close(); // close the TTS socket only now
+    ttsRef.current = null;
+    speakingRef.current = false;
     thinkingRef.current = false;
-    interruptedRef.current = false;
+    pendingInputRef.current = null;
+    levelRef.current = 0;
     setLiveTranscript('');
     setStatus('idle');
-  }, [cutSpeech]);
+  }, []);
 
   const toggleSession = useCallback(() => {
     if (sessionRef.current) endConversation();
@@ -263,12 +286,15 @@ export default function Copilot() {
     (text) => {
       if (thinkingRef.current) return;
       if (speakingRef.current) {
-        interruptedRef.current = true;
-        cutSpeech(); // typing interrupts speech too
+        // Typing interrupts the current reply too — stash and hand off so the
+        // interrupted turn records its partial before the new turn runs.
+        pendingInputRef.current = text;
+        interruptSpeech();
+        return;
       }
       respond(text);
     },
-    [cutSpeech, respond],
+    [interruptSpeech, respond],
   );
 
   const empty = messages.length === 0;
@@ -289,7 +315,7 @@ export default function Copilot() {
         </div>
         <button
           onClick={() => {
-            if (!muted) cutSpeech();
+            if (!muted) interruptSpeech();
             setMuted((m) => !m);
           }}
           title={muted ? 'Unmute voice' : 'Mute voice'}
