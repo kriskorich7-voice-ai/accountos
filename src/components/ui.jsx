@@ -35,6 +35,32 @@ export function SectionTitle({ icon: Icon, title, hint, right }) {
   );
 }
 
+// ---- Tabs (in-page underline switcher) --------------------------------------
+
+export function Tabs({ tabs, active, onChange, className = '' }) {
+  return (
+    <div className={`flex gap-1 border-b border-slate-200 ${className}`}>
+      {tabs.map((t) => {
+        const isActive = t.key === active;
+        return (
+          <button
+            key={t.key}
+            onClick={() => onChange(t.key)}
+            className={`-mb-px flex items-center gap-2 border-b-2 px-3.5 py-2.5 text-sm font-medium transition-colors ${
+              isActive
+                ? 'border-brand-600 text-brand-700'
+                : 'border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-800'
+            }`}
+          >
+            {t.icon && <t.icon size={16} />}
+            {t.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 // ---- Badges -----------------------------------------------------------------
 
 export function Badge({ children, className = '' }) {

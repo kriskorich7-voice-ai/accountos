@@ -9,14 +9,22 @@ import {
   Users,
   Package,
   ArrowRight,
+  BrainCircuit,
+  Layers,
 } from 'lucide-react';
 import { risks } from '../data/risks.js';
 import { opportunities } from '../data/opportunities.js';
 import { businessUnits, whitespaceInsight } from '../data/products.js';
 import { priorityClasses } from '../lib/format.js';
-import { PageHeader, SectionTitle, ConfidenceBar, Drawer, Button, Badge } from '../components/ui.jsx';
+import { PageHeader, SectionTitle, ConfidenceBar, Drawer, Button, Badge, Tabs } from '../components/ui.jsx';
 import AccountTabs from '../components/AccountTabs.jsx';
 import AIInsight from '../components/AIInsight.jsx';
+import ExpansionKanban from '../components/ExpansionKanban.jsx';
+
+const INTEL_TABS = [
+  { key: 'intel', label: 'Account Intelligence', icon: BrainCircuit },
+  { key: 'pipeline', label: 'Expansion Pipeline', icon: Layers },
+];
 
 function RiskCard({ risk, onClick }) {
   const accent =
@@ -85,12 +93,19 @@ function OpportunityCard({ opp, onClick }) {
 export default function Intelligence() {
   const [risk, setRisk] = useState(null);
   const [opp, setOpp] = useState(null);
+  const [tab, setTab] = useState('intel');
 
   return (
     <div className="mx-auto max-w-6xl px-8 py-8 animate-fade-in">
       <PageHeader eyebrow="Account" title="Acme Corporation" subtitle="Financial Services · North America" />
       <AccountTabs />
 
+      <Tabs tabs={INTEL_TABS} active={tab} onChange={setTab} className="mb-6" />
+
+      {tab === 'pipeline' && <ExpansionKanban />}
+
+      {tab === 'intel' && (
+      <>
       {/* Risks */}
       <div className="mb-8">
         <SectionTitle icon={ShieldAlert} title="Risks" hint={`${risks.length} active`} />
@@ -151,6 +166,8 @@ export default function Intelligence() {
       </div>
 
       <AIInsight label="AI Whitespace Insight">{whitespaceInsight}</AIInsight>
+      </>
+      )}
 
       {/* Risk drawer */}
       <Drawer open={!!risk} onClose={() => setRisk(null)} subtitle="Account Risk" title={risk?.title}>

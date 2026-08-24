@@ -1,0 +1,92 @@
+// Expansion pipeline Kanban — opportunities across sales stages.
+
+export const pipelineSummary = {
+  totalPipeline: 3_200_000,
+  weightedPipeline: 1_800_000,
+  avgDealSize: 535_000,
+  winRate: 68,
+};
+
+export const pipelineStages = [
+  { id: 'identified', title: 'Identified' },
+  { id: 'discovery', title: 'Discovery' },
+  { id: 'proposal', title: 'Proposal' },
+  { id: 'verbal', title: 'Verbal Commit' },
+  { id: 'closed', title: 'Closed Won' },
+];
+
+// Each opportunity carries its starting stage; the Kanban manages moves locally.
+export const pipelineOpportunities = [
+  {
+    id: 'opp-acme-convai',
+    stage: 'discovery',
+    account: 'Acme Corporation',
+    title: 'Conversational AI (Customer Service)',
+    low: 780_000,
+    high: 1_200_000,
+    confidence: 87,
+    contact: 'Daniel Rodriguez',
+    daysInStage: 12,
+    products: ['Voice Agent API', 'Flux TTS'],
+  },
+  {
+    id: 'opp-northstar-ccai',
+    stage: 'discovery',
+    account: 'Northstar Telecom',
+    title: 'Contact Center AI',
+    low: 420_000,
+    high: 650_000,
+    confidence: 74,
+    contact: 'Mark Torres',
+    daysInStage: 8,
+    products: ['Voice Agent API', 'Streaming STT'],
+  },
+  {
+    id: 'opp-acme-sales',
+    stage: 'identified',
+    account: 'Acme Corporation',
+    title: 'Sales Voice Automation',
+    low: 250_000,
+    high: 400_000,
+    confidence: 71,
+    contact: 'Sarah Mitchell',
+    daysInStage: 5,
+    products: ['Nova-3 STT', 'Batch Transcription'],
+  },
+  {
+    id: 'opp-acme-marketing',
+    stage: 'identified',
+    account: 'Acme Corporation',
+    title: 'Marketing & Content Voice',
+    low: 180_000,
+    high: 300_000,
+    confidence: 64,
+    contact: 'TBD',
+    daysInStage: 3,
+    products: ['Flux TTS', 'Batch Transcription'],
+  },
+  {
+    id: 'opp-horizon-patient',
+    stage: 'identified',
+    account: 'Horizon Healthcare',
+    title: 'Patient Services Voice',
+    low: 380_000,
+    high: 520_000,
+    confidence: 69,
+    contact: 'VP Operations',
+    daysInStage: 18,
+    products: ['Voice Agent API', 'Flux TTS'],
+  },
+  {
+    id: 'opp-atlas-bundle',
+    stage: 'proposal',
+    account: 'Atlas Retail',
+    title: 'Renewal + Expansion Bundle',
+    low: 200_000,
+    high: 350_000,
+    confidence: 55,
+    contact: 'CPO',
+    daysInStage: 22,
+    products: ['Batch Transcription'],
+  },
+];

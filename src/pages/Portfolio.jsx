@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   DollarSign,
@@ -10,6 +11,8 @@ import {
   Minus,
   ChevronRight,
   AlertTriangle,
+  LayoutGrid,
+  Repeat,
 } from 'lucide-react';
 import { accounts, portfolioSummary } from '../data/accounts.js';
 import { usageSparklines } from '../data/usage.js';
@@ -19,7 +22,13 @@ import {
   statusMeta,
   riskLevelClasses,
 } from '../lib/format.js';
-import { PageHeader, MetricCard, SectionTitle, HealthRing, Sparkline, Badge } from '../components/ui.jsx';
+import { PageHeader, MetricCard, SectionTitle, HealthRing, Sparkline, Badge, Tabs } from '../components/ui.jsx';
+import NrrDashboard from '../components/NrrDashboard.jsx';
+
+const PORTFOLIO_TABS = [
+  { key: 'overview', label: 'Overview', icon: LayoutGrid },
+  { key: 'nrr', label: 'NRR Dashboard', icon: Repeat },
+];
 
 function TrendIcon({ trend, className }) {
   if (trend === 'up') return <ArrowUpRight size={14} className={className || 'text-emerald-500'} />;
@@ -97,6 +106,7 @@ function AccountCard({ account, onClick }) {
 export default function Portfolio() {
   const navigate = useNavigate();
   const attention = accounts.filter((a) => a.status === 'attention');
+  const [tab, setTab] = useState('overview');
 
   return (
     <div className="mx-auto max-w-7xl px-8 py-8 animate-fade-in">
@@ -106,6 +116,20 @@ export default function Portfolio() {
         subtitle="North America · 5 enterprise accounts · Owned by Kris Korich"
       />
 
+      <Tabs tabs={PORTFOLIO_TABS} active={tab} onChange={setTab} className="mb-6" />
+
+      {tab === 'nrr' ? (
+        <NrrDashboard />
+      ) : (
+        <PortfolioOverview navigate={navigate} attention={attention} />
+      )}
+    </div>
+  );
+}
+
+function PortfolioOverview({ navigate, attention }) {
+  return (
+    <div className="animate-fade-in">
       {/* Portfolio metrics */}
       <div className="mb-8 grid grid-cols-2 gap-4 lg:grid-cols-5">
         <MetricCard

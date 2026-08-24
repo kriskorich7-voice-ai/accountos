@@ -15,7 +15,13 @@ import {
 } from 'lucide-react';
 import { recommendations, meetingBrief, meetingBriefText } from '../data/recommendations.js';
 import { priorityClasses } from '../lib/format.js';
-import { PageHeader, SectionTitle, Button, Badge, Toast } from '../components/ui.jsx';
+import { PageHeader, SectionTitle, Button, Badge, Toast, Tabs } from '../components/ui.jsx';
+import RenewalPipeline from '../components/RenewalPipeline.jsx';
+
+const ACTION_TABS = [
+  { key: 'nba', label: 'Next Best Actions', icon: ListChecks },
+  { key: 'renewal', label: 'Renewal Pipeline', icon: CalendarClock },
+];
 
 function ActionCard({ rec, onCta }) {
   return (
@@ -186,6 +192,7 @@ function MeetingPrep({ onBack, onToast }) {
 
 export default function Actions() {
   const [view, setView] = useState('list');
+  const [tab, setTab] = useState('nba');
   const [toast, setToast] = useState('');
 
   const handleCta = (rec) => {
@@ -200,27 +207,41 @@ export default function Actions() {
 
   return (
     <div className="mx-auto max-w-6xl px-8 py-8">
-      {view === 'list' ? (
+      {view === 'prep' ? (
+        <MeetingPrep onBack={() => setView('list')} onToast={setToast} />
+      ) : (
         <div className="animate-fade-in">
           <PageHeader
-            eyebrow="Next Best Actions"
-            title="What should I do next?"
-            subtitle="AI-prioritized actions for Acme Corporation"
+            eyebrow="Actions"
+            title={tab === 'renewal' ? 'Renewal Pipeline' : 'What should I do next?'}
+            subtitle={
+              tab === 'renewal'
+                ? 'Portfolio renewals ranked by urgency'
+                : 'AI-prioritized actions for Acme Corporation'
+            }
             actions={
-              <Button onClick={() => setView('prep')}>
-                <CalendarClock size={16} /> Prepare for My Next Meeting
-              </Button>
+              tab === 'nba' ? (
+                <Button onClick={() => setView('prep')}>
+                  <CalendarClock size={16} /> Prepare for My Next Meeting
+                </Button>
+              ) : null
             }
           />
-          <SectionTitle icon={ListChecks} title="Recommended Actions" hint="Ranked by priority" />
-          <div className="grid gap-4">
-            {recommendations.map((rec) => (
-              <ActionCard key={rec.id} rec={rec} onCta={handleCta} />
-            ))}
-          </div>
+          <Tabs tabs={ACTION_TABS} active={tab} onChange={setTab} className="mb-6" />
+
+          {tab === 'renewal' ? (
+            <RenewalPipeline />
+          ) : (
+            <>
+              <SectionTitle icon={ListChecks} title="Recommended Actions" hint="Ranked by priority" />
+              <div className="grid gap-4">
+                {recommendations.map((rec) => (
+                  <ActionCard key={rec.id} rec={rec} onCta={handleCta} />
+                ))}
+              </div>
+            </>
+          )}
         </div>
-      ) : (
-        <MeetingPrep onBack={() => setView('list')} onToast={setToast} />
       )}
       <Toast message={toast} onDone={() => setToast('')} />
     </div>
