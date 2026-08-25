@@ -1,22 +1,28 @@
 import { useEffect, useRef, useState } from 'react';
 import { Sparkles, Mic } from 'lucide-react';
 
-// Radial gradients + glow per state. Indigo/violet base (center → outer → edge);
-// amber for thinking.
+// Radial gradients + glow per state. Indigo/violet base (center → mid → outer →
+// edge); amber for connecting/thinking; red for error.
 const BASE_GRADIENT =
-  'radial-gradient(circle at 35% 30%, #818cf8, #4f46e5 55%, #3730a3 100%)';
+  'radial-gradient(circle at 35% 30%, #818cf8, #6366f1 35%, #4f46e5 70%, #3730a3 100%)';
+const AMBER_GRADIENT = 'radial-gradient(circle at 35% 30%, #fcd34d, #f59e0b 55%, #b45309 100%)';
+const ERROR_GRADIENT = 'radial-gradient(circle at 35% 30%, #fca5a5, #ef4444 55%, #991b1b 100%)';
 const GRADIENTS = {
   idle: BASE_GRADIENT,
   listening: BASE_GRADIENT,
   speaking: BASE_GRADIENT,
-  thinking: 'radial-gradient(circle at 35% 30%, #fcd34d, #f59e0b 55%, #b45309 100%)',
+  connecting: AMBER_GRADIENT,
+  thinking: AMBER_GRADIENT,
+  error: ERROR_GRADIENT,
 };
 
 const STATIC_GLOW = {
   idle: '0 0 42px 2px rgba(99,102,241,0.35)',
   listening: '0 0 40px 8px rgba(96,165,250,0.65)',
+  connecting: '0 0 52px 6px rgba(245,158,11,0.5)',
   thinking: '0 0 52px 6px rgba(245,158,11,0.5)',
   speaking: '0 0 44px 2px rgba(99,102,241,0.5)',
+  error: '0 0 44px 4px rgba(239,68,68,0.5)',
 };
 
 const RIPPLE_COLOR = {
@@ -54,11 +60,12 @@ export default function AnimatedOrb({ status = 'idle', getLevel }) {
     : STATIC_GLOW[status];
 
   const orbAnim =
-    status === 'idle'
+    status === 'idle' || status === 'error'
       ? 'animate-orb-idle'
       : status === 'listening'
         ? 'animate-orb-listen'
         : '';
+  const spinning = status === 'thinking' || status === 'connecting';
 
   const showRipples = status === 'listening' || speaking;
   const rippleColor = RIPPLE_COLOR[status] || 'rgba(99,102,241,0.5)';
@@ -83,8 +90,8 @@ export default function AnimatedOrb({ status = 'idle', getLevel }) {
           />
         ))}
 
-      {/* Rotating gradient sweep for the thinking state */}
-      {status === 'thinking' && (
+      {/* Rotating gradient sweep for the connecting / thinking states */}
+      {spinning && (
         <span
           className="absolute rounded-full animate-orb-spin"
           style={{

@@ -1,5 +1,4 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Sparkles, Volume2, VolumeX, User, Mic } from 'lucide-react';
 import { createVoiceAgent, hasDeepgram } from '../lib/deepgram.js';
 import AnimatedOrb from '../components/AnimatedOrb.jsx';
 
@@ -20,30 +19,25 @@ const SUGGESTIONS = [
   'What are the biggest risks?',
 ];
 
-const STATUS = {
-  idle: { label: 'Ready' },
-  connecting: { label: 'Connecting…' },
-  listening: { label: 'Listening…' },
-  thinking: { label: 'Thinking…' },
-  speaking: { label: 'Speaking…' },
+// Status labels keyed by orb state.
+const STATUS_LABEL = {
+  idle: 'Click to speak with AccountOS',
+  connecting: 'Connecting…',
+  listening: 'Listening…',
+  thinking: 'Thinking…',
+  speaking: 'AccountOS is speaking…',
+  error: 'Something went wrong. Click to try again.',
 };
 
 function Bubble({ msg }) {
   const isUser = msg.role === 'user';
   return (
-    <div className={`flex gap-3 ${isUser ? 'flex-row-reverse' : ''} animate-fade-in`}>
+    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'} animate-fade-in`}>
       <div
-        className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
-          isUser ? 'bg-slate-200 text-slate-600' : 'bg-brand-600 text-white shadow-sm shadow-brand-600/30'
-        }`}
-      >
-        {isUser ? <User size={16} /> : <Sparkles size={16} />}
-      </div>
-      <div
-        className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
+        className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
           isUser
-            ? 'rounded-tr-sm bg-slate-800 text-white'
-            : 'rounded-tl-sm bg-white text-slate-700 ring-1 ring-inset ring-slate-200'
+            ? 'rounded-br-sm bg-slate-800 text-white'
+            : 'rounded-bl-sm bg-white text-slate-700 ring-1 ring-inset ring-slate-200'
         }`}
       >
         {msg.content}
@@ -54,10 +48,8 @@ function Bubble({ msg }) {
 
 export default function Copilot() {
   const [messages, setMessages] = useState([]);
-  const [status, setStatus] = useState('idle'); // idle when no session
+  const [status, setStatus] = useState('idle'); // idle | connecting | listening | thinking | speaking | error
   const [sessionActive, setSessionActive] = useState(false);
-  const [muted, setMuted] = useState(false);
-  const [error, setError] = useState('');
 
   const scrollRef = useRef(null);
   const agentRef = useRef(null);
@@ -80,12 +72,20 @@ export default function Copilot() {
     });
   }, []);
 
+  const failToError = useCallback(() => {
+    agentRef.current?.stop();
+    agentRef.current = null;
+    levelRef.current = 0;
+    setSessionActive(false);
+    setStatus('error');
+  }, []);
+
+  // --- Deepgram Voice Agent session (connection logic unchanged) -----------
   const startSession = useCallback(async () => {
     if (!hasDeepgram) {
-      setError('Set VITE_DEEPGRAM_API_KEY to enable the voice agent.');
+      setStatus('error');
       return;
     }
-    setError('');
     setSessionActive(true);
     setStatus('connecting');
     try {
@@ -97,18 +97,15 @@ export default function Copilot() {
         onLevel: (v) => {
           levelRef.current = v;
         },
-        onError: () => setError('Voice agent connection error. Please try again.'),
+        onError: () => failToError(),
         onClose: () => {},
       });
-      agent.setMuted(muted);
       await agent.start();
       agentRef.current = agent;
     } catch {
-      setSessionActive(false);
-      setStatus('idle');
-      setError('Could not start the voice agent. Check your microphone permission.');
+      failToError();
     }
-  }, [addTranscript, muted]);
+  }, [addTranscript, failToError]);
 
   const endSession = useCallback(() => {
     agentRef.current?.stop();
@@ -123,92 +120,64 @@ export default function Copilot() {
     else startSession();
   }, [sessionActive, startSession, endSession]);
 
-  const toggleMute = () => {
-    setMuted((m) => {
-      const next = !m;
-      agentRef.current?.setMuted(next);
-      return next;
-    });
-  };
+  const startFromChip = useCallback(() => {
+    if (!sessionActive) startSession();
+  }, [sessionActive, startSession]);
 
-  const empty = messages.length === 0;
-  const s = STATUS[status] || STATUS.idle;
+  const showTranscript = messages.length > 0;
+  const showChips = !sessionActive && messages.length === 0;
 
   return (
     <div className="flex h-screen flex-col bg-gradient-to-b from-white to-slate-50">
-      {/* Slim header */}
-      <div className="flex items-center justify-between border-b border-slate-200 bg-white/80 px-8 py-4 backdrop-blur">
-        <div className="flex items-center gap-3">
-          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-brand-600 text-white shadow-sm shadow-brand-600/30">
-            <Sparkles size={18} />
+      <div className="flex flex-1 flex-col items-center justify-center px-6 py-8">
+        {/* Label + subtitle */}
+        <div className="text-center">
+          <div className="text-[11px] font-semibold uppercase tracking-[0.25em] text-slate-400">
+            Ask AccountOS
           </div>
-          <div>
-            <h1 className="text-lg font-bold tracking-tight text-slate-900">Ask AccountOS</h1>
-            <p className="text-xs text-slate-500">Your AI strategic account copilot · Deepgram Voice Agent</p>
-          </div>
+          <div className="mt-1.5 text-sm text-slate-500">Your AI strategic account copilot</div>
         </div>
+
+        {/* Orb — click to start / stop */}
         <button
-          onClick={toggleMute}
-          title={muted ? 'Unmute agent' : 'Mute agent'}
-          className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+          type="button"
+          onClick={toggleSession}
+          aria-label={sessionActive ? 'Stop conversation' : 'Start conversation'}
+          className="group mt-8 rounded-full outline-none transition-transform focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:ring-offset-2 active:scale-95"
         >
-          {muted ? <VolumeX size={18} /> : <Volume2 size={18} />}
+          <AnimatedOrb status={status} getLevel={() => levelRef.current} />
         </button>
-      </div>
 
-      {/* Centerpiece: orb + status, with suggestions or transcript below */}
-      <div className="flex flex-1 flex-col items-center overflow-hidden px-6 py-6">
-        <div className={`flex shrink-0 flex-col items-center gap-4 ${empty ? 'my-auto' : 'pt-4'}`}>
-          {/* Orb is the sole session control */}
-          <button
-            type="button"
-            onClick={toggleSession}
-            aria-label={sessionActive ? 'Stop conversation' : 'Start conversation'}
-            className="group rounded-full outline-none transition-transform focus-visible:ring-2 focus-visible:ring-brand-400 focus-visible:ring-offset-2 active:scale-95"
-          >
-            <AnimatedOrb
-              status={status === 'connecting' ? 'thinking' : status}
-              getLevel={() => levelRef.current}
-            />
-          </button>
-          <div className="text-center">
-            <div className="text-base font-semibold text-slate-800">{s.label}</div>
-            <div className="mt-1 min-h-[18px] text-sm text-slate-400">
-              {sessionActive ? 'Click orb to stop' : 'Click orb to start'}
-            </div>
-            {error && <div className="mt-1 text-xs font-medium text-rose-500">{error}</div>}
-          </div>
-
-          {/* Suggested prompts — shown before a conversation begins */}
-          {empty && (
-            <div className="mt-2 w-full max-w-xl">
-              <div className="mb-2 text-center text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                Try asking out loud
-              </div>
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                {SUGGESTIONS.map((q) => (
-                  <button
-                    key={q}
-                    onClick={toggleSession}
-                    className="group rounded-xl border border-slate-200 bg-white px-4 py-3 text-left text-sm text-slate-700 transition-all hover:-translate-y-0.5 hover:border-brand-300 hover:shadow-cardhover"
-                  >
-                    <span className="flex items-center gap-2 font-medium group-hover:text-brand-700">
-                      <Mic size={13} className="text-slate-300 group-hover:text-brand-400" />
-                      {q}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
+        {/* Status */}
+        <div
+          className={`mt-5 min-h-[24px] text-center text-sm font-medium ${
+            status === 'error' ? 'text-rose-500' : 'text-slate-600'
+          }`}
+        >
+          {STATUS_LABEL[status] || STATUS_LABEL.idle}
         </div>
 
-        {/* Transcript */}
-        {!empty && (
+        {/* Suggested questions — before a conversation starts */}
+        {showChips && (
+          <div className="mt-7 grid w-full max-w-xl grid-cols-1 gap-2 sm:grid-cols-2">
+            {SUGGESTIONS.map((q) => (
+              <button
+                key={q}
+                onClick={startFromChip}
+                className="group rounded-xl border border-slate-200 bg-white px-4 py-3 text-center text-sm font-medium text-slate-600 transition-all hover:-translate-y-0.5 hover:border-brand-300 hover:text-brand-700 hover:shadow-cardhover"
+              >
+                {q}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Transcript — replaces chips once the conversation begins */}
+        {showTranscript && (
           <div
             ref={scrollRef}
-            className="mt-6 w-full max-w-2xl space-y-4 overflow-y-auto px-1"
-            style={{ maxHeight: 340 }}
+            className="mt-7 w-full max-w-xl space-y-3 overflow-y-auto px-1"
+            style={{ maxHeight: 250 }}
           >
             {messages.map((m, i) => (
               <Bubble key={i} msg={m} />
@@ -217,13 +186,9 @@ export default function Copilot() {
         )}
       </div>
 
-      {/* Footer note */}
-      <div className="border-t border-slate-200 bg-white px-8 py-3">
-        <p className="text-center text-[11px] text-slate-400">
-          {sessionActive
-            ? 'Live voice session — speak naturally, the agent handles turns and interruptions'
-            : 'Deepgram Voice Agent · Flux STT + Claude Sonnet 4.6 + Flux TTS · one real-time connection'}
-        </p>
+      {/* Footer */}
+      <div className="pb-6 text-center text-[11px] text-slate-400">
+        Powered by Deepgram Voice Agent API · Claude Sonnet 4.6
       </div>
     </div>
   );
