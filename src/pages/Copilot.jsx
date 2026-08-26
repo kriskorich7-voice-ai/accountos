@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { useConversation } from '@elevenlabs/react';
+import { useConversation, ConversationProvider } from '@elevenlabs/react';
 import { createVoiceAgent, hasDeepgram } from '../lib/deepgram.js';
 import AnimatedOrb from '../components/AnimatedOrb.jsx';
 
@@ -76,7 +76,7 @@ function ProviderPill({ id, label, letter, active, disabled, activeCls, onClick 
   );
 }
 
-export default function Copilot() {
+function CopilotInner() {
   const [provider, setProvider] = useState('deepgram'); // 'deepgram' | 'elevenlabs'
   const [messages, setMessages] = useState([]);
   const [status, setStatus] = useState('idle'); // idle|connecting|listening|thinking|speaking|error
@@ -302,5 +302,14 @@ export default function Copilot() {
         )}
       </div>
     </div>
+  );
+}
+
+// useConversation() must run inside a ConversationProvider, so wrap the page.
+export default function Copilot() {
+  return (
+    <ConversationProvider>
+      <CopilotInner />
+    </ConversationProvider>
   );
 }
