@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { useConversation, ConversationProvider } from '@elevenlabs/react';
+import { useConversation } from '@elevenlabs/react';
 import { createVoiceAgent, hasDeepgram } from '../lib/deepgram.js';
 import AnimatedOrb from '../components/AnimatedOrb.jsx';
 
@@ -76,7 +76,7 @@ function ProviderPill({ id, label, letter, active, disabled, activeCls, onClick 
   );
 }
 
-function CopilotInner() {
+export default function Copilot() {
   const [provider, setProvider] = useState('deepgram'); // 'deepgram' | 'elevenlabs'
   const [messages, setMessages] = useState([]);
   const [status, setStatus] = useState('idle'); // idle|connecting|listening|thinking|speaking|error
@@ -116,12 +116,28 @@ function CopilotInner() {
     },
   });
 
+  // Hold the latest conversation handle so the unmount cleanup reads it fresh.
+  const elevenRef = useRef(elevenLabs);
+  elevenRef.current = elevenLabs;
+
+  // Cleanup on unmount — end any active sessions so leaving the page never
+  // crashes. endSession() returns void (not a promise), so guard it in try/catch.
   useEffect(() => {
     return () => {
-      agentRef.current?.stop();
-      elevenLabs.endSession?.().catch?.(() => {});
+      try {
+        if (elevenRef.current?.status === 'connected') elevenRef.current.endSession();
+      } catch {
+        // ignore cleanup errors
+      }
+      try {
+        // createVoiceAgent().stop() closes the Deepgram WebSocket, stops the mic
+        // tracks, and closes both AudioContexts internally.
+        agentRef.current?.stop();
+        agentRef.current = null;
+      } catch {
+        // ignore cleanup errors
+      }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const failToError = useCallback(() => {
@@ -302,14 +318,5 @@ function CopilotInner() {
         )}
       </div>
     </div>
-  );
-}
-
-// useConversation() must run inside a ConversationProvider, so wrap the page.
-export default function Copilot() {
-  return (
-    <ConversationProvider>
-      <CopilotInner />
-    </ConversationProvider>
   );
 }

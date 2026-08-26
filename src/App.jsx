@@ -1,4 +1,5 @@
 import { Routes, Route, Navigate } from 'react-router-dom';
+import { ConversationProvider } from '@elevenlabs/react';
 import Sidebar from './components/Sidebar.jsx';
 import Portfolio from './pages/Portfolio.jsx';
 import AccountOverview from './pages/AccountOverview.jsx';
@@ -12,10 +13,14 @@ import Copilot from './pages/Copilot.jsx';
 
 export default function App() {
   return (
-    <div className="min-h-screen bg-gray-50">
-      <Sidebar />
-      <main className="ml-64 min-h-screen">
-        <Routes>
+    // ConversationProvider lives at the app root so the ElevenLabs conversation
+    // context persists across navigation and isn't torn down when the Copilot
+    // page unmounts.
+    <ConversationProvider>
+      <div className="min-h-screen bg-gray-50">
+        <Sidebar />
+        <main className="ml-64 min-h-screen">
+          <Routes>
           <Route path="/" element={<Portfolio />} />
           <Route path="/account/acme" element={<AccountOverview />} />
           <Route path="/account/acme/adoption" element={<Adoption />} />
@@ -28,9 +33,10 @@ export default function App() {
           <Route path="/inbox" element={<InboxPage />} />
           <Route path="/signals" element={<Signals />} />
           <Route path="/copilot" element={<Copilot />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </main>
-    </div>
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </main>
+      </div>
+    </ConversationProvider>
   );
 }
