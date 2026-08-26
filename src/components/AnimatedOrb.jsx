@@ -33,15 +33,18 @@ const RIPPLE_COLOR = {
 const ORB_SIZE = 220;
 const CORE_SIZE = 188;
 
-// status: 'idle' | 'listening' | 'thinking' | 'speaking'
+// status: 'idle' | 'connecting' | 'listening' | 'thinking' | 'speaking' | 'error'
 // getLevel: () => number (0..1) — real-time TTS amplitude, read while speaking.
-export default function AnimatedOrb({ status = 'idle', getLevel }) {
+// breathe: when true, the speaking state uses a CSS breathing animation instead
+//          of amplitude (for providers without an AnalyserNode, e.g. ElevenLabs).
+export default function AnimatedOrb({ status = 'idle', getLevel, breathe = false }) {
   const [level, setLevel] = useState(0);
   const rafRef = useRef(null);
+  const amplitudeDriven = status === 'speaking' && !breathe;
 
-  // While speaking, poll amplitude on our own rAF so only the orb re-renders.
+  // While speaking (amplitude mode), poll on our own rAF so only the orb re-renders.
   useEffect(() => {
-    if (status !== 'speaking' || !getLevel) {
+    if (!amplitudeDriven || !getLevel) {
       setLevel(0);
       return undefined;
     }
@@ -51,20 +54,24 @@ export default function AnimatedOrb({ status = 'idle', getLevel }) {
     };
     rafRef.current = requestAnimationFrame(loop);
     return () => rafRef.current && cancelAnimationFrame(rafRef.current);
-  }, [status, getLevel]);
+  }, [amplitudeDriven, getLevel]);
 
   const speaking = status === 'speaking';
-  const scale = speaking ? 1 + Math.min(level, 1) * 0.4 : 1; // 1.0 → 1.4
-  const glow = speaking
+  const scale = amplitudeDriven ? 1 + Math.min(level, 1) * 0.4 : 1; // 1.0 → 1.4
+  const glow = amplitudeDriven
     ? `0 0 ${44 + level * 90}px ${4 + level * 18}px rgba(99,102,241,${0.4 + level * 0.5})`
-    : STATIC_GLOW[status];
+    : speaking
+      ? '0 0 70px 10px rgba(99,102,241,0.55)' // bright static glow for CSS breathing
+      : STATIC_GLOW[status];
 
   const orbAnim =
     status === 'idle' || status === 'error'
       ? 'animate-orb-idle'
       : status === 'listening'
         ? 'animate-orb-listen'
-        : '';
+        : speaking && breathe
+          ? 'animate-orb-breathe'
+          : '';
   const spinning = status === 'thinking' || status === 'connecting';
 
   const showRipples = status === 'listening' || speaking;
@@ -111,8 +118,10 @@ export default function AnimatedOrb({ status = 'idle', getLevel }) {
           height: CORE_SIZE,
           background: GRADIENTS[status],
           boxShadow: glow,
-          transform: speaking ? `scale(${scale})` : undefined,
-          transition: speaking
+          // Amplitude mode drives scale inline; breathe mode lets the CSS
+          // animation own the transform.
+          transform: amplitudeDriven ? `scale(${scale})` : undefined,
+          transition: amplitudeDriven
             ? 'transform 70ms linear, box-shadow 70ms linear'
             : 'all 0.3s ease',
         }}

@@ -63,6 +63,18 @@
     opacity: 0;
   }
 }
+@keyframes orb-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.14);
+  }
+}
+.animate-orb-breathe {
+  animation: orb-breathe 1.6s ease-in-out infinite;
+}
 .animate-orb-idle {
   animation: orb-idle 2s ease-in-out infinite;
 }
